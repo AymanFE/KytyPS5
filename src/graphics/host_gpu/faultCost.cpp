@@ -1204,6 +1204,18 @@ void SetFaultInstruction(uint64_t rip) noexcept {
 	t_fault_rip = rip;
 }
 
+int DescribeThread(char* name, uint64_t size) noexcept {
+	return CurrentThreadClass(name, size);
+}
+
+uint64_t FaultInstruction() noexcept {
+	return t_fault_rip;
+}
+
+uint64_t ExeBase() noexcept {
+	return g_exe_begin;
+}
+
 namespace {
 thread_local bool t_retried_fault = false;
 } // namespace

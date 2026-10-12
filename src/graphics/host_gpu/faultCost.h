@@ -142,6 +142,12 @@ void SimProtectEnd() noexcept;
 // `name` gets a short name (guest threads). Set by the renderer (this file has no emulator deps).
 using ThreadDescriber = int (*)(char* name, uint64_t size);
 void SetThreadDescriber(ThreadDescriber describer) noexcept;
+// The calling thread's class and short name, as the fault map reports them (any thread).
+int DescribeThread(char* name, uint64_t size) noexcept;
+// The instruction SetFaultInstruction last recorded on this thread.
+[[nodiscard]] uint64_t FaultInstruction() noexcept;
+// Load address of the emulator executable (0 before the startup benchmark; Windows only).
+[[nodiscard]] uint64_t ExeBase() noexcept;
 // The faulting instruction of the fault the calling thread is resolving (host exception handler).
 void SetFaultInstruction(uint64_t rip) noexcept;
 // The calling thread resolves a host exception in the exception handler: the faulting instruction

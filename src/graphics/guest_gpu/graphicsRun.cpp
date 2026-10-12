@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/coherenceLog.h"
 #include "graphics/host_gpu/gpuTouchedPages.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/readFaultDiag.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
@@ -208,6 +209,10 @@ static uint64_t CpNowNs() {
 
 // cp.csv label rows (KYTY_HANG_TRACE_CP).
 static void TraceCpLabel(const char* kind, const void* dst, uint64_t value, uint64_t size) {
+	// KYTY_READ_FAULT_DIAG: label writes (not deferral notes) the guest may already see.
+	if (ReadFaultDiag::Enabled() && std::strncmp(kind, "label-defer", 11) != 0) {
+		ReadFaultDiag::NoteLabel(kind, reinterpret_cast<uint64_t>(dst), value);
+	}
 	if (HangTrace::CpTraceEnabled()) {
 		HangTrace::CpEvent event;
 		event.event   = kind;
@@ -3024,6 +3029,7 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    HangWatchdog::DebugDelay("label", address);
 				    std::memcpy(reinterpret_cast<void*>(address), &written, size);
 			    }
+			    ReadFaultDiag::NoteLabel("label-deferred-write", address, written);
 			    if (HangTrace::CpTraceEnabled()) {
 				    HangTrace::CpEvent event;
 				    event.event   = "label-deferred-write";
