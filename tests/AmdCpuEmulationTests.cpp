@@ -747,6 +747,99 @@ void TestVendorDecision() {
 	std::printf("host CPU vendor: %s (SSE4a: %s)\n", vendor.c_str(), HostHasSse4a() ? "yes" : "no");
 }
 
+// ---- 7. Guest loads completed by a fault handler (KYTY_READ_FAULT_PUBLISHED) ------------------
+
+// Decodes `code` as the faulting instruction of `context` (RIP set here), with the fault at
+// `fault`, and on success applies `bytes`.
+bool RunGuestLoad(CONTEXT& context, const uint8_t* code, uint64_t fault, const void* bytes,
+                  GuestLoad::Load& load) {
+	context.Rip = reinterpret_cast<DWORD64>(code);
+	if (!Loader::X64InstructionEmulator::DecodeGuestLoad(&context, fault, load)) {
+		return false;
+	}
+	return Loader::X64InstructionEmulator::ApplyGuestLoad(&context, load, bytes);
+}
+
+void TestGuestLoads() {
+	alignas(16) uint8_t data[32] {};
+	for (uint32_t i = 0; i < sizeof(data); i++) {
+		data[i] = static_cast<uint8_t>(0x80 + i);
+	}
+	const auto      address = reinterpret_cast<uint64_t>(data);
+	CONTEXT         context {};
+	GuestLoad::Load load;
+	context.ContextFlags = CONTEXT_FULL;
+
+	{ // vmovss xmm0, [r8]: Astro Bot's render-thread read; bits 127:32 zeroed.
+		const uint8_t code[] = {0xc4, 0xc1, 0x7a, 0x10, 0x00};
+		context.R8           = address;
+		std::memset(&context.Xmm0, 0xff, sizeof(context.Xmm0));
+		Check(RunGuestLoad(context, code, address + 2, data, load), "vmovss xmm0, [r8] decodes");
+		uint32_t words[4] {};
+		std::memcpy(words, &context.Xmm0, sizeof(words));
+		uint32_t expected = 0;
+		std::memcpy(&expected, data, 4);
+		Check(load.address == address && load.size == 4 && words[0] == expected && words[1] == 0 &&
+		          words[2] == 0 && words[3] == 0,
+		      "vmovss loads 4 bytes and zeroes the rest of the register");
+		Check(context.Rip == reinterpret_cast<DWORD64>(code) + 5, "vmovss advances RIP by 5");
+	}
+	{ // mov eax, [rcx]: a 32-bit destination zeroes the upper half.
+		const uint8_t code[] = {0x8b, 0x01};
+		context.Rcx          = address;
+		context.Rax          = ~0ull;
+		Check(RunGuestLoad(context, code, address, data, load), "mov eax, [rcx] decodes");
+		Check(context.Rax == 0x83828180ull, "mov eax zero-extends");
+	}
+	{ // mov ax, [rcx] and mov al, [rcx] merge.
+		const uint8_t code16[] = {0x66, 0x8b, 0x01};
+		context.Rax            = 0x1122334455667788ull;
+		Check(RunGuestLoad(context, code16, address + 1, data, load), "mov ax, [rcx] decodes");
+		Check(context.Rax == 0x1122334455668180ull, "mov ax merges the low 16 bits");
+		const uint8_t code8[] = {0x8a, 0x01};
+		context.Rax           = 0x1122334455667788ull;
+		Check(RunGuestLoad(context, code8, address, data, load), "mov al, [rcx] decodes");
+		Check(context.Rax == 0x1122334455667780ull, "mov al merges the low byte");
+	}
+	{ // movsx rax, word [rcx]; movsxd rax, dword [rcx]; movzx eax, byte [rcx + 0x10].
+		const uint8_t movsx[] = {0x48, 0x0f, 0xbf, 0x01};
+		Check(RunGuestLoad(context, movsx, address, data, load), "movsx rax, word decodes");
+		Check(context.Rax == 0xffffffffffff8180ull, "movsx sign-extends");
+		const uint8_t movsxd[] = {0x48, 0x63, 0x01};
+		Check(RunGuestLoad(context, movsxd, address + 3, data, load), "movsxd rax, dword decodes");
+		Check(context.Rax == 0xffffffff83828180ull, "movsxd sign-extends");
+		const uint8_t movzx[] = {0x0f, 0xb6, 0x41, 0x10};
+		context.Rax           = ~0ull;
+		Check(RunGuestLoad(context, movzx, address + 0x10, data + 0x10, load),
+		      "movzx eax, byte [rcx+0x10] decodes");
+		Check(load.address == address + 0x10 && context.Rax == 0x90ull, "movzx zero-extends");
+	}
+	{ // movups xmm1, [rcx]: 16 bytes.
+		const uint8_t code[] = {0x0f, 0x10, 0x09};
+		Check(RunGuestLoad(context, code, address + 15, data, load), "movups xmm1, [rcx] decodes");
+		Check(load.size == 16 && std::memcmp(&context.Xmm1, data, 16) == 0, "movups loads 16 bytes");
+	}
+	{ // mov rdx, [rip + 3]: RIP-relative, the operand 3 bytes after the 7-byte instruction.
+		alignas(16) uint8_t code[24] = {0x48, 0x8b, 0x15, 0x03, 0x00, 0x00, 0x00};
+		const auto          operand  = reinterpret_cast<uint64_t>(code) + 10;
+		Check(RunGuestLoad(context, code, operand + 4, data, load), "mov rdx, [rip+3] decodes");
+		Check(load.address == operand && load.size == 8 && context.Rdx == 0x8786858483828180ull,
+		      "RIP-relative address and value");
+	}
+	{ // Not completed: read-modify ALU ops, stores, high-byte registers, a fault outside the operand.
+		const uint8_t add[]    = {0x03, 0x01};
+		const uint8_t store[]  = {0x89, 0x01};
+		const uint8_t movah[]  = {0x8a, 0x21};
+		const uint8_t moveax[] = {0x8b, 0x01};
+		Check(!RunGuestLoad(context, add, address, data, load), "add eax, [rcx] is not a plain load");
+		Check(!RunGuestLoad(context, store, address, data, load), "a store is not a load");
+		Check(!RunGuestLoad(context, movah, address, data, load), "mov ah, [rcx] is refused");
+		Check(!RunGuestLoad(context, moveax, address + 4, data, load),
+		      "a fault outside the operand is refused");
+	}
+	std::printf("guest loads: decode/apply checks done\n");
+}
+
 } // namespace
 
 int main() {
@@ -759,6 +852,7 @@ int main() {
 	TestPatchedInsertqKeepsTrap();
 	TestReciprocalSquareRoot();
 	TestRedZone(sse4a);
+	TestGuestLoads();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "AmdCpuEmulationTests: %d checks failed\n", g_failures);
 		return 1;

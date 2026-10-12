@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/guestLoad.h"
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
@@ -44,6 +45,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <mutex>
 #include <optional>
@@ -302,6 +304,106 @@ std::atomic<uint64_t> g_readback_flush_side_copies {0};
 // calls) still drain: nothing faults again after them.
 Live::Switch g_readback_side_writes("KYTY_READBACK_SIDE_WRITES", Live::ParseDefaultOn);
 std::atomic<uint64_t> g_readback_side_writes_copies {0};
+
+// KYTY_READ_FAULT_PUBLISHED (live, default off; =1 on, =verify): a guest thread's read fault on a
+// page whose bytes the GPU owns does not wait for the GPU. When the faulting instruction is a
+// plain load (common/guestLoad.h) of bytes within one page, no image owns the page, and a side or
+// eager readback published the page at most KYTY_READ_FAULT_PUBLISHED_FRAMES guest frames ago
+// (default 2), the load completes in the handler with the page's backing bytes: the GPU-written
+// bytes as last published, the other bytes as they are. The page stays protected (no access) for
+// everyone else, so the command processor and the emulator still synchronize through their own
+// faults and later writes still fault; the read marks the page read-hot, so its eager copy
+// publishes the new bytes once their writer completes. Other reads take the waiting path. This is
+// what a CPU sees that reads GPU-written memory without waiting for the writer: legitimate only for
+// reads the game does not order after the writer (with KYTY_LABEL_MODE=record, Kyty cannot tell,
+// since end-of-pipe labels are written when recorded). Astro Bot's render threads read a GPU-written
+// value this way every frame (eboot 0x736fa9e).
+// =verify takes the waiting path for every read, and compares the bytes the load would have been
+// served with those it finds after the wait (equal / different counts, the first differences).
+// One "Kyty read-fault published" line every 10 s while on.
+int64_t ParseReadFaultPublished(const char* value) {
+	if (value == nullptr || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	return std::strcmp(value, "verify") == 0 ? 2 : 1;
+}
+Live::Switch g_read_fault_published("KYTY_READ_FAULT_PUBLISHED", ParseReadFaultPublished);
+
+uint32_t ReadFaultPublishedFrames() {
+	static const uint32_t frames = [] {
+		const auto* value = std::getenv("KYTY_READ_FAULT_PUBLISHED_FRAMES");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 2u;
+	}();
+	return frames;
+}
+
+struct ReadFaultPublishedState {
+	std::mutex                             mutex;
+	std::unordered_map<uint64_t, uint32_t> published_frame; // tracker page -> guest frame
+	std::atomic<uint64_t>                  served {0};
+	std::atomic<uint64_t>                  undecodable {0};
+	std::atomic<uint64_t>                  image {0};
+	std::atomic<uint64_t>                  stale {0};
+	std::atomic<uint64_t>                  other {0};
+	std::atomic<uint64_t>                  burst {0};
+	std::atomic<uint64_t>                  verify_equal {0};
+	std::atomic<uint64_t>                  verify_different {0};
+	std::atomic<uint64_t>                  report_ns {0};
+	std::atomic<uint32_t>                  report_frame {0};
+	std::atomic<uint32_t>                  logged {0};
+};
+ReadFaultPublishedState& ReadFaultPublished() {
+	static ReadFaultPublishedState state;
+	return state;
+}
+
+// While the switch is on: the guest frame in which a readback last published each page of `ranges`.
+void NoteReadFaultPublication(std::span<const GuestRange> ranges, uint32_t frame) {
+	auto&           state = ReadFaultPublished();
+	std::lock_guard lock(state.mutex);
+	for (const auto& range: ranges) {
+		const auto last = range.address + range.size;
+		for (auto page = Common::AlignDown(range.address, TRACKER_PAGE_SIZE); page < last;
+		     page += TRACKER_PAGE_SIZE) {
+			state.published_frame[page] = frame;
+		}
+	}
+	if (state.published_frame.size() > 8192) {
+		std::erase_if(state.published_frame,
+		              [frame](const auto& entry) { return frame - entry.second > 600; });
+	}
+}
+
+[[nodiscard]] bool ReadFaultPublishedRecently(uint64_t page, uint32_t frame) {
+	auto&           state = ReadFaultPublished();
+	std::lock_guard lock(state.mutex);
+	const auto      found = state.published_frame.find(page);
+	return found != state.published_frame.end() &&
+	       frame - found->second <= ReadFaultPublishedFrames();
+}
+
+void ReportReadFaultPublished(uint32_t frame) {
+	auto&      state = ReadFaultPublished();
+	const auto now   = ReadFaultDiag::NowNs();
+	auto       last  = state.report_ns.load(std::memory_order_relaxed);
+	if (last == 0) {
+		state.report_ns.compare_exchange_strong(last, now);
+		state.report_frame.store(frame, std::memory_order_relaxed);
+		return;
+	}
+	if (now - last < 10'000'000'000ull || !state.report_ns.compare_exchange_strong(last, now)) {
+		return;
+	}
+	const auto frames = std::max<uint32_t>(1, frame - state.report_frame.exchange(frame));
+	const auto take   = [](std::atomic<uint64_t>& counter) { return counter.exchange(0); };
+	const auto served = take(state.served);
+	std::printf("Kyty read-fault published 10s: %u frames, served %" PRIu64 " (%.2f/frame); waited: "
+	            "not a plain load %" PRIu64 ", image %" PRIu64 ", not published recently %" PRIu64
+	            ", other %" PRIu64 ", copy burst %" PRIu64 "; verify: equal %" PRIu64 ", different %" PRIu64 "\n",
+	            frames, served, static_cast<double>(served) / frames, take(state.undecodable),
+	            take(state.image), take(state.stale), take(state.other), take(state.burst), take(state.verify_equal),
+	            take(state.verify_different));
+}
 
 // The number of regions copies (source ascending) give when a copy starting at most `gap` bytes
 // after the previous region's source end joins it.
@@ -1742,6 +1844,81 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 		auto_chooser.vaddr = vaddr;
 		auto_chooser.start = ReadFaultDiag::NowNs();
 	}
+	// KYTY_READ_FAULT_PUBLISHED: complete a guest load with the page's published bytes, or (verify)
+	// remember what it would have read and compare after the wait below.
+	struct PublishedVerify {
+		GuestLoad::Load load;
+		uint8_t         before[16] {};
+		uint32_t        frame = 0;
+		~PublishedVerify() {
+			uint8_t after[16] {};
+			if (!LibKernel::Memory::TryReadBacking(load.address, after, load.size)) {
+				return;
+			}
+			auto&      state = ReadFaultPublished();
+			const bool equal = std::memcmp(before, after, load.size) == 0;
+			(equal ? state.verify_equal : state.verify_different).fetch_add(1, std::memory_order_relaxed);
+			if (!equal && state.logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+				std::string text;
+				for (uint32_t i = 0; i < load.size; i++) {
+					text += fmt::format("{:02x}{:02x} ", before[i], after[i]);
+				}
+				std::printf("Kyty read-fault published verify: 0x%" PRIx64 " (%u bytes) served/waited "
+				            "bytes differ: %s\n",
+				            load.address, load.size, text.c_str());
+			}
+		}
+	};
+	std::optional<PublishedVerify> published_verify;
+	if (const auto published_mode = g_read_fault_published.Get();
+	    published_mode != 0 && !is_write && GuestLoad::t_native_context != nullptr &&
+	    !GuestGpu::IsGpuThread()) {
+		auto&      state = ReadFaultPublished();
+		const auto frame = m_memory_tracker.Frame();
+		ReportReadFaultPublished(frame);
+		const auto      page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+		GuestLoad::Load load;
+		uint8_t         bytes[16] {};
+		// A copy loop over the page would fault on every load: after a burst, wait (which
+		// publishes the page and makes it readable) instead.
+		thread_local uint64_t burst_page  = 0;
+		thread_local uint64_t burst_ns    = 0;
+		thread_local uint32_t burst_count = 0;
+		const auto            now_ns      = ReadFaultDiag::NowNs();
+		burst_count = burst_page == page && now_ns - burst_ns < 1'000'000 ? burst_count + 1 : 0;
+		burst_page  = page;
+		burst_ns    = now_ns;
+		if (burst_count >= 8) {
+			state.burst.fetch_add(1, std::memory_order_relaxed);
+		} else if (!GuestLoad::Decode(vaddr, load) ||
+		    Common::AlignDown(load.address + load.size - 1, TRACKER_PAGE_SIZE) != page) {
+			state.undecodable.fetch_add(1, std::memory_order_relaxed);
+		} else if (!IsRegionGpuModifiedRelaxed(page, TRACKER_PAGE_SIZE) ||
+		           m_texture_cache.IsRegionGpuModified(page, TRACKER_PAGE_SIZE)) {
+			// Not (only) buffer bytes the GPU owns: an image's contents are not in the backing.
+			state.image.fetch_add(1, std::memory_order_relaxed);
+		} else if (!ReadFaultPublishedRecently(page, frame)) {
+			state.stale.fetch_add(1, std::memory_order_relaxed);
+		} else if (!LibKernel::Memory::TryReadBacking(load.address, bytes, load.size)) {
+			state.other.fetch_add(1, std::memory_order_relaxed);
+		} else if (published_mode == 2) {
+			published_verify.emplace();
+			published_verify->load  = load;
+			published_verify->frame = frame;
+			std::memcpy(published_verify->before, bytes, load.size);
+		} else if (GuestLoad::Apply(load, bytes)) {
+			state.served.fetch_add(1, std::memory_order_relaxed);
+			// Keep the page read-hot so its eager copy keeps publishing the GPU's new bytes.
+			(void)m_scheduler.Context().GetGpu().TrySendCommand(
+			    [this, page] { NoteEagerRead(page, TRACKER_PAGE_SIZE, false); });
+			if (diag) {
+				diag->SetPath("published");
+			}
+			return;
+		} else {
+			state.other.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
 	const auto diag_path = [&diag](const char* path) {
 		if (diag) {
 			diag->SetPath(path);
@@ -2417,6 +2594,9 @@ bool BufferCache::CompleteSideReadback(SideReadback& readback) {
 	}
 	if (ReadFaultDiag::Covers(readback.begin, readback.end - readback.begin)) {
 		DiagPrintPublication(readback.ranges, readback.begin, readback.eager, staged);
+	}
+	if (g_read_fault_published.On()) {
+		NoteReadFaultPublication(readback.ranges, m_memory_tracker.Frame());
 	}
 	EndBackingPublication(readback.publication);
 	// Only pages whose pending mark survived lose GPU ownership: a newer recorded writer (or any

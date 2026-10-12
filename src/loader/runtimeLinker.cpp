@@ -761,8 +761,28 @@ static bool TryHandleGuestAccessFault(const Common::HostException::ExceptionInfo
 	if (Libs::Graphics::FaultCost::MapEnabled()) {
 		Libs::Graphics::FaultCost::SetFaultInstruction(info->exception_address);
 	}
-	// The faulting instruction runs again when this handler returns (KYTY_READBACK_SIDE_WRITES).
+	// The faulting instruction runs again when this handler returns (KYTY_READBACK_SIDE_WRITES),
+	// unless the handler completes a load itself (KYTY_READ_FAULT_PUBLISHED, common/guestLoad.h).
 	const Libs::Graphics::FaultCost::RetriedFaultScope retried;
+	static const bool guest_load_registered = [] {
+		GuestLoad::Register(&Loader::X64InstructionEmulator::DecodeGuestLoad,
+		                    &Loader::X64InstructionEmulator::ApplyGuestLoad);
+		return true;
+	}();
+	(void)guest_load_registered;
+	// Only guest code's loads: emulator code reading guest memory must keep synchronizing through
+	// the fault (Windows: an address in no loaded module is guest or generated guest code).
+	bool guest_code = false;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (access == GpuAccess::Read) {
+		HMODULE module = nullptr;
+		guest_code     = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                                    reinterpret_cast<LPCWSTR>(info->exception_address),
+		                                    &module) == 0;
+	}
+#endif
+	const GuestLoad::FaultScope guest_load(guest_code ? info->native_context : nullptr);
 	const bool handled = Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
 	if (HangTrace::Enabled()) {
 		HangTrace::ClearFaultContext();
