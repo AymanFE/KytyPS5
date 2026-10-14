@@ -629,7 +629,7 @@ struct TextureCacheTestAccess {
     cache.m_surface_meta_inserts += cache.m_surface_metas.contains(address) ? 0u : 1u;
     auto &metadata = cache.m_surface_metas[address];
     metadata.type = TextureCache::MetaDataInfo::Type::HTile;
-    metadata.clear_mask = 0;
+    metadata.clear_mask.reset();
   }
 
   static TileManager &Tiler(TextureCache &cache) { return cache.m_tiler; }
@@ -12909,8 +12909,7 @@ public:
               texture_cache.GetImage(ms_depth_image).backing.state.layout ==
                   vk::ImageLayout::eDepthStencilAttachmentOptimal &&
               texture_cache.GetImage(ms_depth_image).IsGpuModified() &&
-              texture_cache.GetImage(ms_depth_image).info.htile_clear_mask ==
-                  0 &&
+              !texture_cache.GetImage(ms_depth_image).info.htile_initial_clear &&
               texture_cache.GetImage(ms_depth_image).info.metadata.range ==
                   ms_depth_desc.info.metadata.range &&
               texture_cache.IsMeta(ms_htile_address) &&
@@ -13688,7 +13687,7 @@ public:
       };
       auto metadata_depth_a = MakeMetadataDepth(metadata_data_a, metadata_a);
       auto metadata_depth_b = MakeMetadataDepth(metadata_data_b, metadata_b);
-      metadata_depth_a.info.htile_clear_mask = 0;
+      metadata_depth_a.info.htile_initial_clear = false;
       const auto metadata_depth_a_id =
           texture_cache.FindImage(metadata_depth_a);
       const auto metadata_depth_b_id =
@@ -13706,6 +13705,8 @@ public:
               metadata_depth_a_view != nullptr &&
                   metadata_depth_b_view != nullptr &&
                   !texture_cache.IsMetaCleared(base + metadata_a, 0) &&
+                  !texture_cache.IsMetaCleared(base + metadata_a, 86) &&
+                  !texture_cache.IsMetaCleared(base + metadata_a, 8191) &&
                   texture_cache.ClearMeta(base + metadata_a) &&
                   texture_cache.ClearMeta(base + metadata_b),
               "shared-page metadata did not retain logical clear state");
@@ -13742,6 +13743,32 @@ public:
               texture_cache.TouchMeta(base + metadata_b, 0, false) &&
               !texture_cache.IsMetaCleared(base + metadata_b, 0),
           "per-slice metadata update incorrectly required prior GPU ownership");
+      constexpr std::array htile_slices{31u, 32u, 63u, 64u, 86u, 8191u};
+      Require(name, "HTile clear across slice words",
+              texture_cache.ClearMeta(base + metadata_b),
+              "registered metadata did not accept a full clear");
+      for (const auto slice : htile_slices) {
+        Require(name, "independent high HTile slice",
+                texture_cache.IsMetaCleared(base + metadata_b, slice) &&
+                    texture_cache.TouchMeta(base + metadata_b, slice, false) &&
+                    !texture_cache.IsMetaCleared(base + metadata_b, slice) &&
+                    texture_cache.IsMetaCleared(base + metadata_b, 0),
+                "high slice clear state was missing or aliased a lower slice");
+      }
+      (void)texture_cache.FindDepthTarget(metadata_depth_b_id, metadata_depth_b);
+      Require(name, "HTile registration retains consumed slices",
+              std::ranges::none_of(htile_slices, [&](uint32_t slice) {
+                return texture_cache.IsMetaCleared(base + metadata_b, slice);
+              }) && texture_cache.TouchMeta(base + metadata_b, 86, true) &&
+                  texture_cache.IsMetaCleared(base + metadata_b, 86) &&
+                  !texture_cache.IsMetaCleared(base + metadata_b, 64) &&
+                  !texture_cache.IsMetaCleared(base + metadata_b, 8192) &&
+                  !texture_cache.TouchMeta(base + metadata_b, 8192, true) &&
+                  texture_cache.ClearMeta(base + metadata_b) &&
+                  std::ranges::all_of(htile_slices, [&](uint32_t slice) {
+                    return texture_cache.IsMetaCleared(base + metadata_b, slice);
+                  }),
+              "registration reset consumed slices or full clear failed to rearm them");
       resources.GetBufferCache().FillBuffer(base + metadata_b, sizeof(uint32_t),
                                             0, false);
       Require(
@@ -13754,7 +13781,7 @@ public:
       auto reused_depth = MakeMetadataDepth(0x12300, 0x28000);
       reused_depth.info.pixel_format = vk::Format::eD32SfloatS8Uint;
       reused_depth.info.stencil = {base + 0x12200, 0x80};
-      reused_depth.info.htile_clear_mask = 0;
+      reused_depth.info.htile_initial_clear = false;
       reused_depth.view_info.format = vk::Format::eD32SfloatS8Uint;
       reused_depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth |
                                       vk::ImageAspectFlagBits::eStencil;
@@ -21923,7 +21950,7 @@ public:
         previous_depth.info.mip_layout[0] = {0, 0x10000, 128, 128};
         previous_depth.info.metadata.kind = ImageMetadataKind::Htile;
         previous_depth.info.metadata.range = {dcc_address, metadata_size.size};
-        previous_depth.info.htile_clear_mask = 0;
+        previous_depth.info.htile_initial_clear = false;
         previous_depth.view_info.format = vk::Format::eD32Sfloat;
         previous_depth.view_info.type = vk::ImageViewType::e2D;
         previous_depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth;

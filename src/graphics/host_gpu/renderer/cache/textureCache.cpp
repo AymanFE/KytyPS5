@@ -2235,7 +2235,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 		}
 	}
 	RefreshImage(cached_id);
-	info.htile_clear_mask     = 0;
+	info.htile_initial_clear  = false;
 	const auto replacement_id = InsertImage(info);
 	auto&      replacement    = m_slot_images[replacement_id];
 	replacement.usage         = cached.usage;
@@ -4657,15 +4657,15 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	image.info.stencil = desc.info.stencil;
 	image.info.metadata = desc.info.metadata;
 	if (desc.info.HasMetadata()) {
-		const MetaDataInfo entry {.type       = MetaDataInfo::Type::HTile,
-		                          .clear_mask = image.info.htile_clear_mask};
-		bool inserted = false;
-		if (CpCommit::Enabled(CpCommit::Part::TargetAlloc)) {
-			// Inserts exactly when emplace would (the key is absent), without building and freeing
-			// a node every draw when it is present.
-			inserted = m_surface_metas.try_emplace(desc.info.metadata.range.address, entry).second;
-		} else {
-			inserted = m_surface_metas.emplace(desc.info.metadata.range.address, entry).second;
+		// Inserts only when the key is absent, without building and freeing a node (and its
+		// 8192-slice clear mask) every draw when it is present.
+		const auto [metadata, inserted] =
+		    m_surface_metas.try_emplace(desc.info.metadata.range.address);
+		if (inserted) {
+			metadata->second.type = MetaDataInfo::Type::HTile;
+			if (image.info.htile_initial_clear) {
+				metadata->second.clear_mask.set();
+			}
 		}
 		// The only insertion into m_surface_metas (EraseSurfaceMeta). Every draw with this target
 		// asks again; only an added entry is a change (KYTY_META_CLEAR_MEMO's generation).
@@ -6387,8 +6387,17 @@ static bool MetaClearMemoEnabled() {
 	return g_meta_clear_memo.On();
 }
 
+// Slices 0-31 of an entry's clear mask (what KYTY_META_CLEAR_MEMO keeps; higher slices bypass it).
+static uint32_t LowSliceClearMask(const auto& entry) {
+	uint32_t mask = 0;
+	for (uint32_t slice = 0; slice < 32u; slice++) {
+		mask |= entry.clear_mask.test(slice) ? 1u << slice : 0u;
+	}
+	return mask;
+}
+
 bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice) {
-	if (MetaClearMemoEnabled()) {
+	if (MetaClearMemoEnabled() && slice < 32) {
 		// The generation is read before the lookup and bumped after every change: a change racing
 		// with this call leaves the memo stale for the next call only (it then looks up again), and
 		// this answer is what the locked lookup gave just before that change. The memo epoch rides
@@ -6401,18 +6410,18 @@ bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice) {
 			const auto       found = m_surface_metas.find(address);
 			memo = {.address    = address,
 			        .generation = generation,
-			        .clear_mask = found != m_surface_metas.end() ? found->second.clear_mask : 0u,
+			        .clear_mask = found != m_surface_metas.end() ? LowSliceClearMask(found->second) : 0u,
 			        .found      = found != m_surface_metas.end(),
 			        .valid      = true};
 		}
-		return memo.found && slice < 32 && (memo.clear_mask & (1u << slice)) != 0;
+		return memo.found && (memo.clear_mask & (1u << slice)) != 0;
 	}
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
-	if (found == m_surface_metas.end() || slice >= 32) {
+	if (found == m_surface_metas.end() || slice >= found->second.clear_mask.size()) {
 		return false;
 	}
-	return (found->second.clear_mask & (1u << slice)) != 0;
+	return found->second.clear_mask.test(slice);
 }
 
 bool TextureCache::ClearMeta(uint64_t address) {
@@ -6421,7 +6430,7 @@ bool TextureCache::ClearMeta(uint64_t address) {
 	if (found == m_surface_metas.end()) {
 		return false;
 	}
-	found->second.clear_mask = UINT32_MAX;
+	found->second.clear_mask.set();
 	NoteSurfaceMetaChange();
 	return true;
 }
@@ -6429,16 +6438,12 @@ bool TextureCache::ClearMeta(uint64_t address) {
 bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
-	if (found == m_surface_metas.end() || slice >= 32) {
+	if (found == m_surface_metas.end() || slice >= found->second.clear_mask.size()) {
 		return false;
 	}
-	const auto previous = found->second.clear_mask;
-	if (is_clear) {
-		found->second.clear_mask |= 1u << slice;
-	} else {
-		found->second.clear_mask &= ~(1u << slice);
-	}
-	if (found->second.clear_mask != previous) {
+	const bool previous = found->second.clear_mask.test(slice);
+	found->second.clear_mask.set(slice, is_clear);
+	if (previous != is_clear) {
 		NoteSurfaceMetaChange();
 	}
 	return true;
