@@ -321,6 +321,15 @@ to `_device_fault.nv-gpudmp` in its working folder. Send that console text (from
 `.nv-gpudmp` file if there is one, the GPU model and the driver version. The diagnostics can cost speed, so remove the
 line again afterwards.
 
+## If Astro Bot stops with "too many objects/batches in this scene"
+
+This is the game's own check (`command_buffer_writer.ppr.cpp:31`, then a crash at `pc=0x9004a0c3e`): one of its
+per-frame command buffers (7, 7, 4, 4 and 6 MiB) ran full. Add `"KYTY_AGC_CB_WATERMARK": "1"` to `u59-preset.json`
+and run until it happens again. The console then prints each buffer's highest use so far (`Agc cb watermark: ... new
+peak`), split into the emulator's packets ("library") and the game's own data ("game"), and a summary every 10 s. The
+crash report also prints the 64 bytes at each register that points to memory; for this crash `[rbx]` is the full
+buffer's state. Send the console text from the last summary line on. The diagnostic costs a little speed.
+
 ## Caveats
 
 - Program caches are reused only from a build with the same shader translation. Otherwise the first launch of each

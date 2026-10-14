@@ -40,6 +40,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -912,6 +913,27 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				append("{} {:016x}", (i % 4 == 0) ? "\n " : "", stack[i]);
 			}
 			append("\n");
+		}
+		{
+			// The first 64 bytes at each register that points to readable memory: the object a
+			// guest assert checked (Astro Bot's "too many objects/batches" assert has its command
+			// buffer writer in rbx: bottom, top, cursor_up, cursor_down, callback, user data,
+			// reserved dwords).
+			const std::pair<const char*, uint64_t> registers[] = {
+			    {"rax", info->rax}, {"rbx", info->rbx}, {"rcx", info->rcx}, {"rdx", info->rdx},
+			    {"rsi", info->rsi}, {"rdi", info->rdi}, {"r12", info->r12}, {"r13", info->r13},
+			    {"r14", info->r14}, {"r15", info->r15}};
+			for (const auto& [name, value]: registers) {
+				if (value < 0x10000 || (value & 7u) != 0 || !IsReadableRange(value, 64)) {
+					continue;
+				}
+				const auto* words = reinterpret_cast<const uint64_t*>(value);
+				append("[{}]:", name);
+				for (int i = 0; i < 8; i++) {
+					append(" {:016x}", words[i]);
+				}
+				append("\n");
+			}
 		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		// The faulting host call chain, unwound from the fault context, with each frame's module and

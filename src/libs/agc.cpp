@@ -29,10 +29,15 @@
 #include <array>
 #include <span>
 #include <atomic>
+#include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #ifdef min
@@ -249,6 +254,156 @@ static RegisterDefaults* get_internal_register_defaults(uint32_t ver) {
 	return get_register_defaults(g_agc_internal_reg_defaults_by_version[index], &storage[index]);
 }
 
+// KYTY_AGC_CB_WATERMARK=1 (diagnostic): per guest command buffer, the bytes in use at each Kyty
+// allocation, split into the library side (cursor_up, Kyty's packets) and the game side
+// (cursor_down, the game's inline packets and data). A rewind of either cursor ends the buffer's
+// frame. A new per-buffer peak above a quarter of the capacity is printed at once, and a summary of
+// every buffer every 10 s. Tells whether Astro Bot's "too many objects/batches in this scene"
+// (command_buffer_writer.ppr.cpp:31) is the game's data or Kyty's packets.
+namespace CbWatermark {
+
+struct State {
+	const void* bottom      = nullptr;
+	uint64_t    capacity    = 0;
+	uint64_t    last_up     = 0;
+	uint64_t    last_down   = 0;
+	uint64_t    frame_up    = 0;
+	uint64_t    frame_down  = 0;
+	uint64_t    frames      = 0;
+	uint64_t    sum_total   = 0;
+	uint64_t    max_total   = 0;
+	uint64_t    max_up      = 0;
+	uint64_t    max_down    = 0;
+	uint64_t    over_half   = 0;
+	uint64_t    window_max  = 0;
+	uint64_t    window_from = 0;
+	uint32_t    max_reserved_dw = 0;
+};
+
+static bool Enabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_AGC_CB_WATERMARK");
+		const bool  on    = value != nullptr && std::strcmp(value, "1") == 0;
+		if (on) {
+			std::printf("Agc command buffer watermark: on (KYTY_AGC_CB_WATERMARK)\n");
+			std::fflush(stdout);
+		}
+		return on;
+	}();
+	return enabled;
+}
+
+static double Mib(uint64_t bytes) {
+	return static_cast<double>(bytes) / 1048576.0;
+}
+
+static double Percent(uint64_t part, uint64_t whole) {
+	return 100.0 * static_cast<double>(part) / static_cast<double>(std::max<uint64_t>(whole, 1));
+}
+
+static void EndFrame(State* s) {
+	const uint64_t total = s->frame_up + s->frame_down;
+	s->frames++;
+	s->sum_total += total;
+	s->max_up     = std::max(s->max_up, s->frame_up);
+	s->max_down   = std::max(s->max_down, s->frame_down);
+	s->window_max = std::max(s->window_max, total);
+	if (total * 2 > s->capacity) {
+		s->over_half++;
+	}
+	if (total > s->max_total) {
+		s->max_total = total;
+		if (total * 4 > s->capacity) {
+			std::printf("Agc cb watermark: buffer %p (%.2f MiB) new peak %.2f MiB = %.0f%% "
+			            "(library %.2f MiB, game %.2f MiB) at frame %" PRIu64 "\n",
+			            s->bottom, Mib(s->capacity), Mib(total), Percent(total, s->capacity),
+			            Mib(s->frame_up), Mib(s->frame_down), s->frames);
+			std::fflush(stdout);
+		}
+	}
+	s->frame_up   = 0;
+	s->frame_down = 0;
+}
+
+static void Note(const void* bottom, const void* top, const void* cursor_up,
+                 const void* cursor_down, uint32_t reserved_dw) {
+	static std::mutex                            mutex;
+	static std::vector<State>                    states;
+	static std::chrono::steady_clock::time_point last_report = std::chrono::steady_clock::now();
+
+	const auto b  = reinterpret_cast<uintptr_t>(bottom);
+	const auto t  = reinterpret_cast<uintptr_t>(top);
+	const auto cu = reinterpret_cast<uintptr_t>(cursor_up);
+	const auto cd = reinterpret_cast<uintptr_t>(cursor_down);
+	if (t < b || cu < b || cd > t || cu > cd) {
+		static std::atomic<uint32_t> reported {0};
+		if (reported.fetch_add(1) < 16) {
+			std::printf("Agc cb watermark: inconsistent buffer bottom=%p top=%p cursor_up=%p "
+			            "cursor_down=%p reserved_dw=%" PRIu32 "\n",
+			            bottom, top, cursor_up, cursor_down, reserved_dw);
+			std::fflush(stdout);
+		}
+		return;
+	}
+	const uint64_t up   = cu - b;
+	const uint64_t down = t - cd;
+
+	std::scoped_lock lock(mutex);
+	State*           s = nullptr;
+	for (auto& state: states) {
+		if (state.bottom == bottom) {
+			s = &state;
+			break;
+		}
+	}
+	if (s == nullptr) {
+		s           = &states.emplace_back();
+		s->bottom   = bottom;
+		s->capacity = t - b;
+	}
+	if (up < s->last_up || down < s->last_down) {
+		EndFrame(s);
+	}
+	if (reserved_dw > s->max_reserved_dw) {
+		s->max_reserved_dw = reserved_dw;
+		std::printf("Agc cb watermark: buffer %p reserved_dw %" PRIu32 " (new maximum)\n",
+		            s->bottom, reserved_dw);
+		std::fflush(stdout);
+	}
+	s->last_up    = up;
+	s->last_down  = down;
+	s->frame_up   = std::max(s->frame_up, up);
+	s->frame_down = std::max(s->frame_down, down);
+
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last_report < std::chrono::seconds(10)) {
+		return;
+	}
+	last_report = now;
+	std::string line = "Agc cb watermark 10s:";
+	for (auto& state: states) {
+		if (state.frames == state.window_from || state.capacity < 1048576u) {
+			continue;
+		}
+		char text[256];
+		std::snprintf(text, sizeof(text),
+		              " [%p %.1fMiB: %" PRIu64 " frames, avg %.0f%%, 10s max %.0f%%, max %.0f%% "
+		              "(lib %.2f game %.2f MiB), >50%% %" PRIu64 "]",
+		              state.bottom, Mib(state.capacity), state.frames,
+		              Percent(state.sum_total / state.frames, state.capacity),
+		              Percent(state.window_max, state.capacity),
+		              Percent(state.max_total, state.capacity), Mib(state.max_up),
+		              Mib(state.max_down), state.over_half);
+		line += text;
+		state.window_max  = 0;
+		state.window_from = state.frames;
+	}
+	std::printf("%s\n", line.c_str());
+	std::fflush(stdout);
+}
+
+} // namespace CbWatermark
+
 struct CommandBuffer {
 	using Callback = KYTY_SYSV_ABI bool (*)(CommandBuffer*, uint32_t, void*);
 
@@ -311,6 +466,9 @@ struct CommandBuffer {
 		}
 		auto* ret_ptr = cursor_up;
 		cursor_up += size_dw;
+		if (CbWatermark::Enabled()) [[unlikely]] {
+			CbWatermark::Note(bottom, top, cursor_up, cursor_down, reserved_dw);
+		}
 		return ret_ptr;
 	}
 };
