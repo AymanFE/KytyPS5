@@ -5,6 +5,7 @@
 #include "common/crashContext.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/guestProbe.h"
 #include "common/hangTrace.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -1540,6 +1541,9 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 		                      m_programs)) {
 			EXIT("Failed to apply game cheat\n");
 		}
+	}
+	if (!m_programs.empty() && !m_programs.front()->elf->IsShared()) {
+		Common::GuestProbe::Arm(m_programs.front()->base_vaddr, m_programs.front()->base_size);
 	}
 	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {
 		StartModule(libc, 0, nullptr, nullptr);

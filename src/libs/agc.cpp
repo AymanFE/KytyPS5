@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/guestProbe.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/virtualMemory.h"
@@ -278,6 +279,16 @@ struct State {
 	uint64_t    window_max  = 0;
 	uint64_t    window_from = 0;
 	uint32_t    max_reserved_dw = 0;
+	// Per frame: Kyty allocations (about one per packet the game asks the library for) and game
+	// blocks (the game side grew by at least 24 KiB between two of them: Astro Bot's per-draw
+	// constant uploads); their per-buffer maxima; whether this frame already raised its alarm.
+	uint64_t    frame_calls  = 0;
+	uint64_t    frame_blocks = 0;
+	uint64_t    max_calls    = 0;
+	uint64_t    max_blocks   = 0;
+	uint64_t    prev_calls   = 0;
+	uint64_t    prev_blocks  = 0;
+	bool        alarmed      = false;
 };
 
 static bool Enabled() {
@@ -321,8 +332,15 @@ static void EndFrame(State* s) {
 			std::fflush(stdout);
 		}
 	}
-	s->frame_up   = 0;
-	s->frame_down = 0;
+	s->max_calls    = std::max(s->max_calls, s->frame_calls);
+	s->max_blocks   = std::max(s->max_blocks, s->frame_blocks);
+	s->prev_calls   = s->frame_calls;
+	s->prev_blocks  = s->frame_blocks;
+	s->frame_up     = 0;
+	s->frame_down   = 0;
+	s->frame_calls  = 0;
+	s->frame_blocks = 0;
+	s->alarmed      = false;
 }
 
 static void Note(const void* bottom, const void* top, const void* cursor_up,
@@ -370,10 +388,27 @@ static void Note(const void* bottom, const void* top, const void* cursor_up,
 		            s->bottom, reserved_dw);
 		std::fflush(stdout);
 	}
+	s->frame_calls++;
+	if (down >= s->last_down + 0x6000u) {
+		s->frame_blocks += (down - s->last_down) / 0x6000u;
+	}
 	s->last_up    = up;
 	s->last_down  = down;
 	s->frame_up   = std::max(s->frame_up, up);
 	s->frame_down = std::max(s->frame_down, down);
+	// A frame that passes 75 % is reported while it runs: an overflowing frame never ends.
+	if (!s->alarmed && (up + down) * 4 > s->capacity * 3) {
+		s->alarmed = true;
+		std::printf("Agc cb watermark: buffer %p (%.2f MiB) frame %" PRIu64 " passed 75%%: library "
+		            "%.2f MiB, game %.2f MiB, %" PRIu64 " library calls, %" PRIu64
+		            " game blocks of 24 KiB so far (previous frame %" PRIu64 " / %" PRIu64
+		            ", max %" PRIu64 " / %" PRIu64 ")\n",
+		            s->bottom, Mib(s->capacity), s->frames + 1, Mib(up), Mib(down), s->frame_calls,
+		            s->frame_blocks, s->prev_calls, s->prev_blocks, s->max_calls, s->max_blocks);
+		std::fflush(stdout);
+		// KYTY_GUEST_PROBE '^' probes (e.g. the game's per-draw constant upload) start logging now.
+		Common::GuestProbe::ArmDeferred("command buffer passed 75 % in one frame");
+	}
 
 	const auto now = std::chrono::steady_clock::now();
 	if (now - last_report < std::chrono::seconds(10)) {
@@ -385,15 +420,16 @@ static void Note(const void* bottom, const void* top, const void* cursor_up,
 		if (state.frames == state.window_from || state.capacity < 1048576u) {
 			continue;
 		}
-		char text[256];
+		char text[384];
 		std::snprintf(text, sizeof(text),
 		              " [%p %.1fMiB: %" PRIu64 " frames, avg %.0f%%, 10s max %.0f%%, max %.0f%% "
-		              "(lib %.2f game %.2f MiB), >50%% %" PRIu64 "]",
+		              "(lib %.2f game %.2f MiB), >50%% %" PRIu64 ", calls/blocks max %" PRIu64
+		              "/%" PRIu64 "]",
 		              state.bottom, Mib(state.capacity), state.frames,
 		              Percent(state.sum_total / state.frames, state.capacity),
 		              Percent(state.window_max, state.capacity),
 		              Percent(state.max_total, state.capacity), Mib(state.max_up),
-		              Mib(state.max_down), state.over_half);
+		              Mib(state.max_down), state.over_half, state.max_calls, state.max_blocks);
 		line += text;
 		state.window_max  = 0;
 		state.window_from = state.frames;
