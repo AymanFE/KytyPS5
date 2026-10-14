@@ -1,5 +1,6 @@
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
+#include "graphics/host_gpu/aftermath.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -177,6 +178,7 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool que
 	LOGF("--- Device loss: submission/wait tick=%" PRIu64 " ---\n", tick);
 	DumpDeviceFault(graphics);
 	GpuBreadcrumbs::Dump();
+	Aftermath::WaitForDump();
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {
 		if (!GpuBreadcrumbs::Active()) {
 			std::printf("  No GPU breadcrumbs: NV checkpoints and VK_AMD_buffer_marker breadcrumbs are off (KYTY_DEVICE_FAULT_DIAGNOSTICS=1, KYTY_GPU_BREADCRUMBS).\n");

@@ -554,6 +554,17 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
+# KYTY_AFTERMATH=1 GPU crash dumps (graphics/host_gpu/aftermath.h): only with an extracted NVIDIA Nsight
+# Aftermath SDK (not part of this repository). Its headers build aftermath.cpp; the library is loaded at run
+# time from the emulator's folder.
+set(KYTY_AFTERMATH_SDK "" CACHE PATH "Extracted NVIDIA Nsight Aftermath SDK (optional, Windows)")
+if (WIN32 AND KYTY_AFTERMATH_SDK AND EXISTS "${KYTY_AFTERMATH_SDK}/include/GFSDK_Aftermath_GpuCrashDump.h")
+	set_source_files_properties("${KYTY_SOURCE_DIR}/graphics/host_gpu/aftermath.cpp" PROPERTIES
+		INCLUDE_DIRECTORIES "${KYTY_AFTERMATH_SDK}/include"
+		COMPILE_DEFINITIONS KYTY_HAVE_AFTERMATH=1)
+	message(STATUS "Nsight Aftermath: GPU crash dumps available (KYTY_AFTERMATH=1), SDK ${KYTY_AFTERMATH_SDK}")
+endif()
+
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus libzstd_static)
 
 # Linux system libraries.
