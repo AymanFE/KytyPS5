@@ -826,6 +826,26 @@ uint64_t TextureCache::ResidentPrefixSize(const ImageInfo& info, uint32_t first_
 	return end;
 }
 
+void TextureCache::BindSparseLevelsAfterSubmitted(Image& image, uint32_t first_level) {
+	auto&          master   = m_scheduler.GetMasterSemaphore();
+	const auto     current  = m_scheduler.CurrentTick();
+	const uint64_t previous = current > 1 ? current - 1 : 0;
+	if (previous == 0 || master.KnownGpuTick() >= previous) {
+		m_graphics.BindSparseImageLevels(image.backing, first_level); // nothing in flight
+		return;
+	}
+	// The GPU wait must never precede its signal (queueSubmission.h): hand every older tick to the
+	// driver first, as BufferCache's side readbacks do (KYTY_CP_RECORDER ring, submission broker).
+	m_scheduler.WaitRecorded(previous);
+	const auto& progress = master.GetSubmissionProgress();
+	if (progress != nullptr && progress->dispatched_tick.load(std::memory_order_acquire) < previous) {
+		m_graphics.submission_queue.WaitPendingDependencies(progress.get(), previous);
+		Common::LockGuard lock(m_graphics.queue_mutex);
+		m_graphics.submission_queue.DrainThroughLocked(progress.get(), previous);
+	}
+	m_graphics.BindSparseImageLevels(image.backing, first_level, master.Handle(), previous);
+}
+
 void TextureCache::EnsureResidency(ImageId id, uint32_t first_level, bool sampling) {
 	auto& image = m_slot_images[id];
 	if (first_level >= image.resident_first) {
@@ -846,9 +866,13 @@ void TextureCache::EnsureResidency(ImageId id, uint32_t first_level, bool sampli
 	image.live = new_first != 0 ? GuestRange {image.info.data.address, prefix} : image.info.data;
 	NoteImageStateChange();
 	if (image.backing.sparse) {
-		// KYTY_TEXTURE_SPARSE_RESIDENCY: memory behind the newly resident levels, bound (and waited
-		// for) before anything records a write of them; their refresh follows (MarkResidencyDirty).
-		m_graphics.BindSparseImageLevels(image.backing, new_first);
+		// KYTY_TEXTURE_SPARSE_RESIDENCY: memory behind the newly resident levels; their refresh
+		// follows (MarkResidencyDirty). Submitted ticks may still access these levels: Image::
+		// GetBarriers transitions the whole chain, because sampled views span non-resident levels
+		// and need them in the view's layout. Vulkan forbids such accesses while the binding
+		// changes on another queue (Bug A), so the bind waits on the GPU for every tick before the
+		// current recording, and the current one waits for the bind (CommandScheduler::Submit).
+		BindSparseLevelsAfterSubmitted(image, new_first);
 	}
 	if (registered) {
 		RegisterImage(id);

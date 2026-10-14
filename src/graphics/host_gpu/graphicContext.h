@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/queueSubmission.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -234,12 +235,27 @@ struct GraphicContext {
 	// residency image with memory bound behind levels >= first_level only (a single-layer,
 	// single-sample 2D image whose format, usage and flags support sparse residency; false and
 	// nothing created otherwise). BindSparseImageLevels binds memory behind levels >= first_level
-	// that have none yet. Both wait until the binding is done: unbound levels read as zero
-	// (residencyNonResidentStrict) and writes to them are discarded, so only levels a view can
-	// sample need memory. DeleteImage frees the memory.
+	// that have none yet: unbound levels read as zero (residencyNonResidentStrict) and writes to them
+	// are discarded, so only levels a view can sample need memory. DeleteImage frees the memory.
+	//
+	// Ordering (Bug A): the binds run on the side queue and are ordered on the GPU, never waited for
+	// on the host. A bind waits for `wait_semaphore` >= `wait_value` (the master timeline at the last
+	// queue-0 tick that may use the image; that tick must already be submitted) and signals
+	// SparseBindSemaphore(); every queue-0 batch submitted after it waits for that signal
+	// (SparseBindPendingValue, CommandScheduler::Submit). Vulkan forbids other queues to access a
+	// range while its binding changes, and the image's whole-chain layout transitions (needed
+	// because sampled views span non-resident levels) access the levels being bound.
 	[[nodiscard]] bool     CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t first_level,
 	                                         VulkanImage& image);
-	void                   BindSparseImageLevels(VulkanImage& image, uint32_t first_level);
+	void                   BindSparseImageLevels(VulkanImage& image, uint32_t first_level,
+	                                             vk::Semaphore wait_semaphore = nullptr,
+	                                             uint64_t      wait_value     = 0);
+	// The timeline semaphore image binds signal, and the newest value signalled by a bind that may
+	// not have completed (0: none pending). Null semaphore until the first bind.
+	[[nodiscard]] vk::Semaphore SparseBindSemaphore() const noexcept { return m_sparse_timeline; }
+	[[nodiscard]] uint64_t      SparseBindPendingValue();
+	// Host wait for every image bind submitted so far (teardown, tests).
+	void                        WaitSparseBinds();
 	// The device memory behind an image: its allocation's size, or the bound bytes of a sparse one.
 	[[nodiscard]] uint64_t NativeImageBytes(const VulkanImage& image) const;
 
@@ -250,6 +266,9 @@ private:
 	[[nodiscard]] bool SparseImageSupported(const vk::ImageCreateInfo& info);
 	std::mutex                                 m_sparse_mutex;
 	vk::Fence                                  m_sparse_fence = nullptr;
+	vk::Semaphore                              m_sparse_timeline = nullptr;
+	std::atomic<uint64_t>                      m_sparse_signalled {0}; // newest value a bind signals
+	std::atomic<uint64_t>                      m_sparse_completed {0}; // known reached on the GPU
 	std::map<std::tuple<vk::Format, vk::ImageUsageFlags, vk::ImageCreateFlags>, bool>
 	                                           m_sparse_support;
 	struct RetiredNativeImage {

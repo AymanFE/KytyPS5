@@ -686,6 +686,16 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 			}
 		}
 	}
+	// KYTY_TEXTURE_SPARSE_RESIDENCY: memory bound behind image levels on the side queue
+	// (GraphicContext::BindSparseImageLevels, already submitted) before this batch uses it.
+	if (const auto sparse = m_graphics.SparseBindPendingValue(); sparse != 0) {
+		if (submit.num_wait_semaphores < SubmitInfo::MaxSemaphores) {
+			submit.AddWait(m_graphics.SparseBindSemaphore(), sparse,
+			               vk::PipelineStageFlagBits::eAllCommands);
+		} else {
+			m_graphics.WaitSparseBinds(); // no free wait slot: the binds are done before submission
+		}
+	}
 	const auto count_boundary = [this, &submit, force_completion] {
 		if (!Profiler::AggregateEnabled()) {
 			return;

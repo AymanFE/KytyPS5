@@ -296,6 +296,8 @@ private:
 	// Makes levels >= first_level resident (re-registration; the next refresh uploads them).
 	// `sampling`: requested by a sampled view (counted as an extension, else a fallback).
 	void                      EnsureResidency(ImageId id, uint32_t first_level, bool sampling);
+	// KYTY_TEXTURE_SPARSE_RESIDENCY growth: the bind ordered after every submitted tick (Bug A).
+	void                      BindSparseLevelsAfterSubmitted(Image& image, uint32_t first_level);
 	// Whole chain resident and refreshed now, before a non-sampling use records anything.
 	void                      RequireFullResidency(ImageId id);
 	void                      PoisonNonResidentLevels(Image& image);

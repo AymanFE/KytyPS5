@@ -613,6 +613,7 @@ endfunction()
 
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 add_kyty_full_emulator_test(null_texture_desc_tests "${KYTY_TESTS_DIR}/NullTextureDescTests.cpp")
+add_kyty_full_emulator_test(sparse_residency_stress_tests "${KYTY_TESTS_DIR}/SparseResidencyStressTests.cpp")
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -1144,6 +1145,8 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg_cb_shader_mask_exports COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	set_tests_properties(shader_cfg_cb_shader_mask_exports PROPERTIES ENVIRONMENT "KYTY_CB_SHADER_MASK_EXPORTS=1")
 	add_test(NAME null_texture_desc COMMAND $<TARGET_FILE:null_texture_desc_tests>)
+	# Bug A: sparse residency textures grown, retired and created while dispatches sample them.
+	add_test(NAME sparse_residency_stress COMMAND $<TARGET_FILE:sparse_residency_stress_tests> --iterations 400)
 	add_test(NAME unused_pixel_inputs COMMAND $<TARGET_FILE:shader_cfg_tests> --unused-pixel-inputs-only)
 	add_test(NAME pixel_interface COMMAND $<TARGET_FILE:shader_cfg_tests> --pixel-interface-only)
 	add_test(NAME registered_shader_code_on COMMAND $<TARGET_FILE:shader_cfg_tests> --registered-shader-code-only)
