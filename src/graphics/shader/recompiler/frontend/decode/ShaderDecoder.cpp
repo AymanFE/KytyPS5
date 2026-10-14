@@ -152,6 +152,7 @@ std::string FormatMimg(const Instruction& inst) {
 		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
+		case Opcode::IMAGE_GATHER4_C_L:
 		case Opcode::IMAGE_GATHER4_C_LZ:
 		case Opcode::IMAGE_GATHER4_LZ_O:
 		case Opcode::IMAGE_GATHER4_C_O:
@@ -652,6 +653,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
+		case Opcode::IMAGE_GATHER4_C_L:
 		case Opcode::IMAGE_GATHER4_C_LZ:
 		case Opcode::IMAGE_GATHER4_LZ_O:
 		case Opcode::IMAGE_GATHER4_C_O:
