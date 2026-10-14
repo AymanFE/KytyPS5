@@ -105,6 +105,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1367,8 +1368,18 @@ std::string Hex(u32 value) {
   return buffer;
 }
 
+// --isa-audit-only reports every failing case instead of stopping at the first.
+inline bool g_soft_fail = false;
+struct SoftFailure {
+  std::string text;
+};
+
 [[noreturn]] void Fail(const char *shader_name, const char *stage,
                        const std::string &message) {
+  if (g_soft_fail) {
+    throw SoftFailure{std::string(shader_name) + " failed at " + stage + ": " +
+                      message};
+  }
   std::fflush(stdout);
   std::fprintf(stderr, "ShaderRecompilerComputeTests: %s failed at %s: %s\n",
                shader_name, stage, message.c_str());
@@ -57084,6 +57095,7 @@ void CheckCpSeqOps(RenderContext &renderer) {
 #include "ShaderProgramCacheTests.inc"
 #include "ShaderBvhTests.inc"
 #include "ShaderBdaWriteTests.inc"
+#include "ShaderIsaAuditTests.inc"
 
 } // namespace
 } // namespace Libs::Graphics
@@ -57250,6 +57262,10 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, ImageAtomicSignedMinMax<true>());
     RunCase(&vulkan, ImageAtomicCompareSwapGlcAndExec());
     return 0;
+  }
+  if (argc >= 2 && std::strcmp(argv[1], "--isa-audit-only") == 0) {
+    VulkanHarness vulkan;
+    return IsaAuditTests::Run(&vulkan, argc >= 3 ? argv[2] : nullptr);
   }
   if (argc == 2 && std::strcmp(argv[1], "--s-memrealtime-only") == 0) {
     VulkanHarness vulkan;
