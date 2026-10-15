@@ -438,6 +438,15 @@ struct CommandRecorder::NativeExecutor {
 	void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, uint32_t value) {
 		command.fillBuffer(buffer, offset, size, value);
 	}
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color,
+	                     uint32_t count, const vk::ImageSubresourceRange* ranges) {
+		command.clearColorImage(image, layout, color, count, ranges);
+	}
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout,
+	                            const vk::ClearDepthStencilValue* value, uint32_t count,
+	                            const vk::ImageSubresourceRange* ranges) {
+		command.clearDepthStencilImage(image, layout, value, count, ranges);
+	}
 	void bindPipeline(vk::PipelineBindPoint point, vk::Pipeline pipeline) {
 		command.bindPipeline(point, pipeline);
 	}

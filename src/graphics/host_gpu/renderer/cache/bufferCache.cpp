@@ -2836,7 +2836,9 @@ EagerReadbackPages::IssueResult BufferCache::TryIssueEagerReadback(uint64_t page
 	// the queue, including all writers of these bytes (checked above to be submitted already).
 	auto& command = m_scheduler.Current();
 	command.EndRendering();
-	const auto              native = command.Handle();
+	// Encoded with the recorder (no drain): the completion runner reads the staging only after
+	// this tick completed, which the recorder's submission of it precedes.
+	const auto              native = command.HelperSink();
 	vk::BufferMemoryBarrier before {};
 	before.srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
 	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;

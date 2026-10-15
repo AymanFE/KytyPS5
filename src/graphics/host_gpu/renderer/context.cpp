@@ -1,6 +1,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/hangTrace.h"
+#include "common/liveSwitch.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
@@ -32,6 +33,10 @@
 #endif
 
 namespace Libs::Graphics {
+
+// KYTY_CP_SINK_ROUTES (default 1, live): CommandBuffer::HelperSink() encodes for the recorder; 0
+// drains it and records natively, as the helpers' former Handle() did.
+static Live::Switch g_sink_routes("KYTY_CP_SINK_ROUTES", Live::ParseDefaultOn);
 
 // ------------------------------------------------------------------------------------------------
 // Barrier batcher
@@ -252,6 +257,14 @@ CommandSink CommandBuffer::Sink() const {
 	}
 	m_push_constants.valid = false;
 	return CommandSink(*this);
+}
+
+CommandSink CommandBuffer::HelperSink() const {
+	if (Encoding() && !g_sink_routes.On()) {
+		// The former Handle() path: drain, then record natively in the direct window.
+		(void)Handle();
+	}
+	return Sink();
 }
 
 CommandSink CommandBuffer::StateSink() const {

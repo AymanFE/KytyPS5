@@ -529,7 +529,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset,
 	                     target_capacity % 4 != 0);
 
 	m_scheduler.EndRendering();
-	auto                    command = m_scheduler.Current().Handle();
+	const auto              command = m_scheduler.Current().HelperSink();
 	vk::BufferMemoryBarrier barriers[3] {};
 	barriers[0].srcAccessMask = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eHostWrite;
 	barriers[0].dstAccessMask = vk::AccessFlagBits::eShaderRead;
@@ -1023,7 +1023,7 @@ void TileManager::RecordImage(Image& image, bool load, vk::Buffer tiled, uint64_
 	}
 
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	const auto command = m_scheduler.Current().HelperSink();
 	// Before: the tiled bytes (possibly host-written staging) and the parameters are visible
 	// to the dispatches; the image is in GENERAL for storage access, ordered after every
 	// earlier access (Image::GetBarriers).
@@ -1104,7 +1104,7 @@ void TileManager::RecordImage(Image& image, bool load, vk::Buffer tiled, uint64_
 	image.NoteContentWrite();
 	image.Transit(vk::ImageLayout::eGeneral,
 	              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {},
-	              command);
+	              command.Identity());
 }
 
 bool TileManager::DetileToImage(Image& image, vk::Buffer tiled, uint64_t tiled_offset,
@@ -1325,7 +1325,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	EXIT_IF(source.size < source_barrier_size || target.size < target_barrier_size);
 
 	m_scheduler.EndRendering();
-	auto                    command = m_scheduler.Current().Handle();
+	const auto              command = m_scheduler.Current().HelperSink();
 	vk::BufferMemoryBarrier barriers[2] {};
 	barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1471,7 +1471,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eMemoryRead;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eShaderWrite;
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	const auto command = m_scheduler.Current().HelperSink();
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 2, barriers, 0, nullptr);

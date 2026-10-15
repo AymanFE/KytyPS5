@@ -283,6 +283,14 @@ struct LogExecutor {
 		     VerifyHash::Value(Op::WriteBufferMarker, Bits(b), o,
 		                       static_cast<uint32_t>(static_cast<VkPipelineStageFlagBits>(st)), m));
 	}
+	void clearColorImage(vk::Image i, vk::ImageLayout l, const vk::ClearColorValue* c, uint32_t n,
+	                     const vk::ImageSubresourceRange* r) {
+		Push(Op::ClearColorImage, VerifyHash::ClearColorImage(i, l, *c, n, r));
+	}
+	void clearDepthStencilImage(vk::Image i, vk::ImageLayout l, const vk::ClearDepthStencilValue* v,
+	                            uint32_t n, const vk::ImageSubresourceRange* r) {
+		Push(Op::ClearDepthStencilImage, VerifyHash::ClearDepthStencilImage(i, l, *v, n, r));
+	}
 };
 
 // Discards everything (benchmark consumer).
@@ -809,6 +817,29 @@ public:
 				expected.push_back({op, VerifyHash::Value(op, LogExecutor::Bits(b), o,
 				                                          static_cast<uint32_t>(static_cast<VkPipelineStageFlagBits>(stage)),
 				                                          m)});
+				break;
+			}
+			case Op::ClearColorImage:
+			case Op::ClearDepthStencilImage: {
+				std::vector<vk::ImageSubresourceRange> ranges(n);
+				for (auto& r: ranges) {
+					r = vk::ImageSubresourceRange {vk::ImageAspectFlagBits::eColor, Below(4),
+					                               1 + Below(3), Below(2), 1 + Below(2)};
+				}
+				const auto i = H<vk::Image>();
+				const auto l = vk::ImageLayout::eTransferDstOptimal;
+				if (op == Op::ClearColorImage) {
+					vk::ClearColorValue color {};
+					color.uint32 = {{U32(), U32(), U32(), U32()}};
+					e.clearColorImage(i, l, &color, n, ranges.data());
+					expected.push_back({op, VerifyHash::ClearColorImage(i, l, color, n, ranges.data())});
+				} else {
+					const vk::ClearDepthStencilValue value {static_cast<float>(Below(1000)) / 999.0f,
+					                                        U32() & 0xffu};
+					e.clearDepthStencilImage(i, l, &value, n, ranges.data());
+					expected.push_back(
+					    {op, VerifyHash::ClearDepthStencilImage(i, l, value, n, ranges.data())});
+				}
 				break;
 			}
 			default: break;

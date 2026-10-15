@@ -95,6 +95,9 @@ enum class Op : uint16_t {
 	UpdateDescriptorSets,
 	// vkCmdWriteBufferMarkerAMD (KYTY_GPU_BREADCRUMBS, gpuBreadcrumbs.h).
 	WriteBufferMarker,
+	// Transfer clears (TextureCache::ClearImage).
+	ClearColorImage,
+	ClearDepthStencilImage,
 	Count,
 };
 
@@ -359,6 +362,14 @@ struct WriteBufferMarkerPacket {
 	uint32_t   stage  = 0; // VkPipelineStageFlagBits
 	uint32_t   marker = 0;
 };
+// ClearColorImage: value = the vk::ClearColorValue's 16 bytes. ClearDepthStencilImage: value[0] =
+// the depth's bits, value[1] = the stencil. vk::ImageSubresourceRange[count] follow.
+struct ClearImagePacket {
+	vk::Image       image  = nullptr;
+	vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+	uint32_t        count  = 0;
+	uint32_t        value[4] {};
+};
 
 // ------------------------------------------------------------------------------------------------
 // Verify hashes: one function per native command over its complete argument values (arrays and
@@ -455,6 +466,11 @@ uint64_t Value(Op op, uint64_t a, uint64_t b = 0, uint64_t c = 0, uint64_t d = 0
                uint64_t f = 0);
 uint64_t Floats(Op op, const float* values, uint32_t count);
 uint64_t ColorWriteEnable(uint32_t count, const vk::Bool32* enables);
+uint64_t ClearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue& color,
+                         uint32_t count, const vk::ImageSubresourceRange* ranges);
+uint64_t ClearDepthStencilImage(vk::Image image, vk::ImageLayout layout,
+                                const vk::ClearDepthStencilValue& value, uint32_t count,
+                                const vk::ImageSubresourceRange* ranges);
 } // namespace VerifyHash
 
 // Order-sensitive fold of one packet into a command-buffer digest.
@@ -713,6 +729,11 @@ public:
 	void writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool, uint32_t query);
 	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
 	                          uint32_t marker);
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color,
+	                     uint32_t count, const vk::ImageSubresourceRange* ranges);
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout,
+	                            const vk::ClearDepthStencilValue* value, uint32_t count,
+	                            const vk::ImageSubresourceRange* ranges);
 
 private:
 	class Writer;

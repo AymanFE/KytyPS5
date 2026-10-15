@@ -132,7 +132,7 @@ void FaultManager::ProcessFaultBuffer() {
 	}
 
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	const auto command = m_scheduler.Current().HelperSink();
 	vk::DependencyInfo dependency {};
 	dependency.dependencyFlags          = vk::DependencyFlagBits::eByRegion;
 	dependency.bufferMemoryBarrierCount = 1;
@@ -211,7 +211,7 @@ FaultManager::BdaWrites FaultManager::CollectBdaWrites() {
 	constexpr auto dropped_offset = BufferCache::BDA_DROPPED_WRITES_WORD * sizeof(uint32_t);
 
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	const auto command = m_scheduler.Current().HelperSink();
 	// The dispatch's shader atomics on the bitmap and the counter before the parse and the copy.
 	vk::BufferMemoryBarrier2 before {};
 	before.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;

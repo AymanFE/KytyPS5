@@ -527,6 +527,23 @@ void Replay(const Header& header, Exec& exec, ReplayState& state, MismatchHandle
 			                          p.marker);
 			break;
 		}
+		case Op::ClearColorImage: {
+			const auto&         p      = reader.Get<ClearImagePacket>();
+			const auto*         ranges = reader.GetArray<vk::ImageSubresourceRange>(p.count);
+			vk::ClearColorValue color {};
+			std::memcpy(&color, p.value, sizeof(color));
+			check(VerifyHash::ClearColorImage(p.image, p.layout, color, p.count, ranges));
+			exec.clearColorImage(p.image, p.layout, &color, p.count, ranges);
+			break;
+		}
+		case Op::ClearDepthStencilImage: {
+			const auto& p      = reader.Get<ClearImagePacket>();
+			const auto* ranges = reader.GetArray<vk::ImageSubresourceRange>(p.count);
+			const vk::ClearDepthStencilValue value {std::bit_cast<float>(p.value[0]), p.value[1]};
+			check(VerifyHash::ClearDepthStencilImage(p.image, p.layout, value, p.count, ranges));
+			exec.clearDepthStencilImage(p.image, p.layout, &value, p.count, ranges);
+			break;
+		}
 	}
 	if (site != nullptr) {
 		exec.LeaveSite();

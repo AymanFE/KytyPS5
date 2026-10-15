@@ -239,6 +239,10 @@ public:
 	[[nodiscard]] CommandSink Sink() const;
 	[[nodiscard]] CommandSink StateSink() const;
 	[[nodiscard]] CommandSink EmissionSink() const;
+	//  - HelperSink(): Sink() for the cache/tiler/fault/readback helpers that recorded through
+	//    Handle() before (each drained the recorder). KYTY_CP_SINK_ROUTES=0 (live; default 1)
+	//    restores that: the recorder is drained and the sink records natively in the direct window.
+	[[nodiscard]] CommandSink HelperSink() const;
 	// Marks an emission safe point without a sink.
 	void BeginEmission() const { CloseDirectWindow(); }
 	// The native command buffer being recorded, for identity comparisons only (Image::Transit
@@ -572,6 +576,23 @@ public:
 			m_owner->m_encoder->fillBuffer(buffer, offset, size, value);
 		} else {
 			m_owner->m_buffer.fillBuffer(buffer, offset, size, value);
+		}
+	}
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color,
+	                     uint32_t count, const vk::ImageSubresourceRange* ranges) const {
+		if (m_owner->Encoding()) {
+			m_owner->m_encoder->clearColorImage(image, layout, color, count, ranges);
+		} else {
+			m_owner->m_buffer.clearColorImage(image, layout, color, count, ranges);
+		}
+	}
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout,
+	                            const vk::ClearDepthStencilValue* value, uint32_t count,
+	                            const vk::ImageSubresourceRange* ranges) const {
+		if (m_owner->Encoding()) {
+			m_owner->m_encoder->clearDepthStencilImage(image, layout, value, count, ranges);
+		} else {
+			m_owner->m_buffer.clearDepthStencilImage(image, layout, value, count, ranges);
 		}
 	}
 	void bindPipeline(vk::PipelineBindPoint point, vk::Pipeline pipeline) const {

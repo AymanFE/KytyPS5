@@ -5100,6 +5100,8 @@ bool TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		}
 	}
 	command.EndRendering();
+	// Recorder-aware (no drain): the transitions go through the batcher (Identity() targets).
+	const auto sink = command.HelperSink();
 	// Transfer clears use the backing format; aliased clears must encode through their view.
 	if (format != image.backing.format || (image.info.IsVolume() && !full_image)) {
 		// Shape validated up front (ClearRangeFault::ViewClearShape).
@@ -5111,7 +5113,7 @@ bool TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		view.layer_count = range.layerCount;
 		view.usage       = vk::ImageUsageFlagBits::eColorAttachment;
 		image.Transit(vk::ImageLayout::eColorAttachmentOptimal,
-		              vk::AccessFlagBits2::eColorAttachmentWrite, {}, command.Handle());
+		              vk::AccessFlagBits2::eColorAttachmentWrite, {}, sink.Identity());
 		vk::RenderingAttachmentInfo attachment {};
 		attachment.imageView   = image.FindView(view);
 		attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
@@ -5125,26 +5127,25 @@ bool TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		rendering.layerCount           = range.layerCount;
 		rendering.colorAttachmentCount = 1;
 		rendering.pColorAttachments    = &attachment;
-		command.Handle().beginRendering(&rendering);
-		command.Handle().endRendering();
+		sink.beginRendering(rendering);
+		sink.endRendering();
 		image.NoteContentWrite();
 		CommitGpuWrite(image);
 		return true;
 	}
 	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
-	              command.Handle());
+	              sink.Identity());
 	auto native_range = range;
 	if (image.info.IsVolume()) {
 		native_range.baseArrayLayer = 0;
 		native_range.layerCount     = 1;
 	}
 	if (range.aspectMask == vk::ImageAspectFlagBits::eColor) {
-		command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
-		                                 &clear.color, 1, &native_range);
+		sink.clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear.color,
+		                     1, &native_range);
 	} else {
-		command.Handle().clearDepthStencilImage(image.backing.image,
-		                                        vk::ImageLayout::eTransferDstOptimal,
-		                                        &clear.depthStencil, 1, &native_range);
+		sink.clearDepthStencilImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
+		                            &clear.depthStencil, 1, &native_range);
 	}
 	image.NoteContentWrite();
 	CommitGpuWrite(image);
@@ -5477,7 +5478,7 @@ uint64_t TextureCache::MaterializeOwnedBytes(GuestRange range, ImageId only, Ima
 		});
 		m_scheduler.EndRendering();
 		{
-			const auto              command = m_scheduler.Current().Handle();
+			const auto              command = m_scheduler.Current().HelperSink();
 			vk::BufferMemoryBarrier before[2] {};
 			before[0].srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
 			before[0].dstAccessMask       = vk::AccessFlagBits::eTransferRead;
@@ -5502,9 +5503,9 @@ uint64_t TextureCache::MaterializeOwnedBytes(GuestRange range, ImageId only, Ima
 		DownloadImageTo(image, scratch.buffer, scratch.offset, scratch.size, data.size,
 		                std::move(transfer));
 		{
-			// Handle() again: the tile pass may have begun a new command buffer.
+			// Again: the tile pass may have begun a new command buffer.
 			m_scheduler.EndRendering();
-			const auto              command = m_scheduler.Current().Handle();
+			const auto              command = m_scheduler.Current().HelperSink();
 			vk::BufferMemoryBarrier between[2] {};
 			between[0].srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
 			between[0].dstAccessMask       = vk::AccessFlagBits::eTransferRead;
