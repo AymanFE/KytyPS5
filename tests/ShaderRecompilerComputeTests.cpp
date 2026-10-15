@@ -55905,6 +55905,10 @@ void CheckPm4AcquireMemNoOp(RenderContext &renderer) {
           "ACQUIRE_MEM did not consume both pinned packet forms as "
           "side-effect-free "
           "no-ops");
+  const std::array<uint32_t, 7> native_payload{0x7fc0u, 2u, 0u, 0x12345678u, 0xabu, 25u, 0x20u};
+  Require("Pm4AcquireMemNoOp", "native PS5 packet",
+          CpOpAcquireMem(processor, 0xc0065800u, native_payload.data(), 0, 0) == 7,
+          "eight-DWORD ACQUIRE_MEM was not consumed");
   std::printf("[host]    %-32s ok\n", "Pm4AcquireMemNoOp");
 }
 
@@ -56681,6 +56685,52 @@ struct AgcCommandBufferLayout {
 };
 static_assert(offsetof(AgcCommandBufferLayout, cursor_up) == 0x10);
 static_assert(offsetof(AgcCommandBufferLayout, reserved_dw) == 0x30);
+
+// Upstream a5ceb4818: AgcDcbAcquireMem / AgcAcbAcquireMem emit native IT_ACQUIRE_MEM packets whose
+// byte range covers every touched 256-byte block.
+void CheckAgcAcquireMemPackets() {
+  constexpr const char *name = "AgcAcquireMemPackets";
+  struct Case {
+    const char *label;
+    bool async;
+    uint8_t engine;
+    uint32_t cb_db, gcr;
+    uint64_t base, size;
+    uint32_t poll;
+    std::array<uint32_t, 8> expected;
+  };
+  const Case cases[]{
+      {"captured byte range", false, 1, 0, 0x9000, 0x2036000308ull, 0x20, 400,
+       {0xc0065800, 0x80000000, 1, 0, 0x20360003, 0, 25, 0x9000}},
+      {"crossing high address", false, 0, 0x7fc0, 0x20, 0xab12345678f0ull, 0x40, 400,
+       {0xc0065800, 0x7fc0, 2, 0, 0x12345678, 0xab, 25, 0x20}},
+      {"full range", false, 0, 0x7fc0, 0x20, 0, UINT64_MAX, 400,
+       {0xc0065800, 0x7fc0, UINT32_MAX, 0xff, 0, 0, 25, 0x20}},
+      {"wide range and saturated poll", false, 1, 0, 0x380, 0, 0x10000000000ull, UINT32_MAX,
+       {0xc0065800, 0x80000000, 0, 1, 0, 0, 0xffff, 0x380}},
+      {"async byte range", true, 0, 0, 0x9000, 0x2036000308ull, 0x20, 400,
+       {0xc0065800, 0, 1, 0, 0x20360003, 0, 25, 0x9000}},
+  };
+  Require(name, "packet sizes", Gen5::AgcDcbAcquireMemGetSize() == 32 &&
+              Gen5::AgcAcbAcquireMemGetSize() == 32,
+          "native single ACQUIRE_MEM packet size changed");
+  for (const auto &test : cases) {
+    std::array<uint32_t, 8> packet{};
+    AgcCommandBufferLayout layout{packet.data(), packet.data() + packet.size(),
+                                  packet.data(), packet.data() + packet.size(),
+                                  nullptr, nullptr, 0};
+    auto *buffer = reinterpret_cast<Gen5::CommandBuffer *>(&layout);
+    const auto *base = reinterpret_cast<const volatile void *>(test.base);
+    auto *emitted = test.async
+        ? Gen5::AgcAcbAcquireMem(buffer, test.gcr, base, test.size, test.poll)
+        : Gen5::AgcDcbAcquireMem(buffer, test.engine, test.cb_db, test.gcr,
+                                 base, test.size, test.poll);
+    Require(name, test.label, emitted == packet.data() &&
+                layout.cursor_up == packet.data() + packet.size() && packet == test.expected,
+            "ACQUIRE_MEM differs from the pinned native packet");
+  }
+  std::printf("[host]    %-32s ok\n", name);
+}
 
 void CheckAgcWaitPackets(RenderContext &renderer) {
   GraphicsInitJmpTables();
@@ -58631,6 +58681,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--agc-wait-only") == 0) {
     VulkanHarness vulkan;
     CheckAgcWaitPackets(vulkan.RuntimeRenderer());
+    CheckAgcAcquireMemPackets();
     CheckPm4WaitResume(vulkan.RuntimeRenderer());
     return 0;
   }
@@ -59287,6 +59338,7 @@ int main(int argc, char **argv) {
   CheckAgcShaderFusion();
   CheckAgcSystemTable(vulkan.RuntimeRenderer());
   CheckAgcWaitPackets(vulkan.RuntimeRenderer());
+  CheckAgcAcquireMemPackets();
   CheckAgcDrawIndirectMultiPacket(vulkan.RuntimeRenderer());
   CheckPm4ContextStateOperations(vulkan.RuntimeRenderer());
   CheckPm4IndirectControlFlow(vulkan.RuntimeRenderer());

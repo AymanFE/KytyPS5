@@ -1338,8 +1338,10 @@ KYTY_HW_UC_PARSER(HwUcSetGdsOaRegisters) {
 KYTY_CP_OP_PARSER(CpOpAcquireMem) {
 	KYTY_PROFILER_DETAIL_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0055800 && cmd_id != 0xc0061050);
-	return (cmd_id == 0xc0061050 ? 7 : 6);
+	// IT_ACQUIRE_MEM in its PS4 (7 DWORDs) and PS5 (8 DWORDs, what AgcDcbAcquireMem emits) forms,
+	// and the custom NOP form older builds emitted (kept for recorded command streams).
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0055800 && cmd_id != 0xc0065800 && cmd_id != 0xc0061050);
+	return cmd_id == 0xc0061050 ? 7 : KYTY_PM4_LEN(cmd_id) - 1;
 }
 
 KYTY_CP_OP_PARSER(CpOpDispatchDirect) {
