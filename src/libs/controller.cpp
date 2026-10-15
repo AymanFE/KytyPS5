@@ -1020,17 +1020,29 @@ int GameController::InitPort() {
 
 int GameController::OpenPort(int user_id, int type, int index) {
 	Common::LockGuard lock(m_mutex);
-	if (m_port_state == PortState::Uninitialized) {
-		return PAD_ERROR_NOT_INITIALIZED;
+	const auto result = [&] {
+		if (m_port_state == PortState::Uninitialized) {
+			return PAD_ERROR_NOT_INITIALIZED;
+		}
+		if (!PadOpenArgsAreValid(user_id, type, index)) {
+			return PAD_ERROR_INVALID_ARG;
+		}
+		if (m_port_state == PortState::Open) {
+			return PAD_ERROR_ALREADY_OPENED;
+		}
+		m_port_state = PortState::Open;
+		return PAD_HANDLE;
+	}();
+	// Games open their ports a few times at most; the first opens show which ports a title uses
+	// (upstream b65dc1220 accepts only the standard port and rejects a second open).
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+		// stdout, flushed: shown whatever the printf direction (players' console logs).
+		std::printf("Pad: open user %d type %d index %d -> %s (0x%08x)\n", user_id, type, index,
+		            result == PAD_HANDLE ? "handle" : "rejected", static_cast<uint32_t>(result));
+		std::fflush(stdout);
 	}
-	if (!PadOpenArgsAreValid(user_id, type, index)) {
-		return PAD_ERROR_INVALID_ARG;
-	}
-	if (m_port_state == PortState::Open) {
-		return PAD_ERROR_ALREADY_OPENED;
-	}
-	m_port_state = PortState::Open;
-	return PAD_HANDLE;
+	return result;
 }
 
 int GameController::GetPortHandle(int user_id, int type, int index) {
