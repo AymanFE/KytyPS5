@@ -33,6 +33,7 @@ struct MemSpec {
 	uint64_t length = 0x40;
 	bool     condition = false; // '!' prefix: log only when these bytes are not all zero
 	bool     write     = false; // '=' prefix: store the 8-byte value <len> at the address (experiments)
+	bool     watch     = false; // '&' prefix: at the first matched hit, a hardware write watch (8 bytes)
 };
 
 struct Probe {
@@ -114,6 +115,10 @@ std::string Describe(const Probe& probe, const CONTEXT& c) {
 		line += fmt::format(" ret={:x}", ret >= g_base ? ret - g_base : ret);
 	}
 	for (const auto& m: probe.mem) {
+		if (m.watch) {
+			line += fmt::format(" watch({}+{:x})", kRegNames[m.reg], m.off);
+			continue;
+		}
 		if (m.write) {
 			line += fmt::format(" write({}+{:x})={:x}", kRegNames[m.reg], m.off, m.length);
 			continue;
@@ -196,6 +201,7 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 	}
 	const auto address = reinterpret_cast<uint64_t>(e->ExceptionRecord->ExceptionAddress);
 	std::string line;
+	uint64_t    new_watch = 0;
 	{
 		std::scoped_lock lock(g_mutex);
 		Probe* probe = nullptr;
@@ -231,6 +237,13 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 				line = Describe(*probe, c);
 			}
 			for (const auto& m: probe->mem) {
+				if (m.watch && g_watch_address.load() == 0 && new_watch == 0) {
+					uint64_t at = RegValue(c, m.reg) + m.off;
+					if (m.deref) {
+						at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+					}
+					new_watch = at;
+				}
 				if (!m.write) {
 					continue;
 				}
@@ -254,6 +267,14 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 	}
 	if (!line.empty()) {
 		Log::WriteToConsoleAndLog(line);
+	}
+	if (new_watch != 0) {
+		// The other threads through ArmWriteWatch, this one through its exception context.
+		ArmWriteWatch(new_watch);
+		if (g_watch_address.load() == new_watch) {
+			c.Dr0 = new_watch;
+			c.Dr7 = (c.Dr7 & ~uint64_t {0xf0003}) | 1u | (1u << 16u) | (2u << 18u);
+		}
 	}
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -350,6 +371,10 @@ void Arm(uint64_t base, uint64_t size) {
 				m.condition = true;
 				f           = f.substr(1);
 			}
+			if (!f.empty() && f[0] == '&') {
+				m.watch = true;
+				f       = f.substr(1);
+			}
 			if (!f.empty() && f[0] == '=') {
 				m.write = true;
 				f       = f.substr(1);
@@ -369,7 +394,7 @@ void Arm(uint64_t base, uint64_t size) {
 			if (sign != f.npos && f[sign] == '-') {
 				m.off = uint64_t {0} - m.off;
 			}
-			if (m.reg < 0 || (!m.write && (m.length == 0 || m.length > 0x1000))) {
+			if (m.reg < 0 || (!m.write && !m.watch && (m.length == 0 || m.length > 0x1000))) {
 				Log::WriteToConsoleAndLog(fmt::format("GuestProbe: bad memory spec '{}'\n", fields[i]));
 				continue;
 			}

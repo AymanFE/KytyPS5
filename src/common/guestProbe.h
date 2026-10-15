@@ -17,6 +17,8 @@
 //             reg+off, or with *off2 at (*(u64*)(reg+off))+off2
 //             prefix '!': a condition; the hit counts and logs only if those bytes are not all 0
 //             prefix '=': an experiment; stores the 8-byte value <hexlen> at the address
+//             prefix '&': at the first matched hit, a hardware write watch (ArmWriteWatch) on the
+//             8 bytes at that address, on every thread including this one
 //
 // Each logged hit is one "GuestProbe:" line with the general registers, the return address at
 // [rsp] (meaningful at a function entry) and the dumps. The instruction under the breakpoint is
