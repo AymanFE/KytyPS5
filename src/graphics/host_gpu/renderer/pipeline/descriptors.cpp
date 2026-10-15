@@ -1271,10 +1271,6 @@ static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
 	return {buffer.Handle(), offset, data.size_bytes()};
 }
 
-// KYTY_UPLOAD_COMPARE_COPY (default 1, live): an upload site's last-upload check compares and,
-// on a miss, copies its reference words in one pass (the equal prefix is not copied again).
-static Live::Switch g_upload_compare_copy("KYTY_UPLOAD_COMPARE_COPY", Live::ParseDefaultOn);
-
 // KYTY_UPLOAD_DEDUP=0 restores the previous per-draw upload memo (64 hashed slots, only with
 // KYTY_RENDERER_BATCH=1).
 static bool UploadDedupEnabled() {
@@ -1325,21 +1321,8 @@ vk::DescriptorBufferInfo RenderExecutor::UploadShaderData(std::span<const uint32
 		const auto tick = m_context.GetCommandScheduler().CurrentTick();
 		if (!UploadDedupTableEnabled()) {
 			auto& last = m_upload_site_last[site % m_upload_site_last.size()];
-			// One pass over the words: the equal prefix is compared once, and on a miss only the
-			// words from the first difference on are copied into the site's reference (the prefix
-			// already holds them), instead of a full comparison followed by a full copy.
-			// KYTY_UPLOAD_COMPARE_COPY=0 (live): the former full comparison and full copy.
-			const bool one_pass = g_upload_compare_copy.On();
-			size_t     same     = 0;
-			if (!one_pass) {
-				same = std::ranges::equal(data, last.words) ? data.size() : 0;
-			} else if (last.words.size() == data.size()) {
-				const auto* known = last.words.data();
-				while (same < data.size() && known[same] == data[same]) {
-					same++;
-				}
-			}
-			if (same == data.size() && last.allocation.buffer != nullptr && last.tick == tick) {
+			if (last.allocation.buffer != nullptr && last.tick == tick &&
+			    std::ranges::equal(data, last.words)) {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadLastHits);
 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadReuseHits);
 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadBytesAvoided,
@@ -1347,17 +1330,7 @@ vk::DescriptorBufferInfo RenderExecutor::UploadShaderData(std::span<const uint32
 				return last.allocation;
 			}
 			const auto allocation = NativeUpload(m_context, data);
-			if (!one_pass) {
-				last.words.assign(data.begin(), data.end());
-			} else {
-				if (last.words.size() != data.size()) {
-					last.words.resize(data.size());
-				}
-				if (same < data.size()) {
-					std::memcpy(last.words.data() + same, data.data() + same,
-					            (data.size() - same) * sizeof(uint32_t));
-				}
-			}
+			last.words.assign(data.begin(), data.end());
 			last.allocation = allocation;
 			// The upload may have submitted (ring wrap): the allocation belongs to the tick after it.
 			last.tick = m_context.GetCommandScheduler().CurrentTick();
