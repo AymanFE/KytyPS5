@@ -1208,6 +1208,8 @@ if(BUILD_TESTING)
 	add_test(NAME lod_stats_report COMMAND $<TARGET_FILE:lod_stats_report_tests>)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
 	add_test(NAME u59_preset COMMAND $<TARGET_FILE:u59_preset_tests>)
+	add_test(NAME shader_codegen
+	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --codegen-only)
 	add_test(NAME lod_stats_codegen
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --lod-stats-codegen-only)
 	add_test(NAME gi_probe_codegen
