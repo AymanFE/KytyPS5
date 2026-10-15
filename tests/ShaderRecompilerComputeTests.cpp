@@ -30843,6 +30843,73 @@ public:
   // bytes the buffer paths leave (Detile + Image::Upload, TileImage): image texels compared
   // through a buffer->image readback, tiled bytes compared over the whole range including the
   // bytes no element covers. Also checks partial-band regions and the fallback rules.
+  // Device loss 2026-10-15 (tiler.h ScratchHold): a scratch buffer handed out inside a
+  // TextureCache operation must not return to the pool (or be freed) when the tick it was
+  // allocated in completes, if that tick was submitted early (a stream-ring wrap) while the
+  // operation still uses the buffer in a later tick.
+  void CheckTilerScratchHold() {
+    constexpr const char *name = "TilerScratchHold";
+    EnsureRuntimeContext();
+    CommandScheduler scheduler(Renderer(), m_runtime_context,
+                               CommandScheduler::Role::Guest);
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    StreamBuffer parameters(m_runtime_context, scheduler, MemoryUsage::Stream,
+                            1u << 20);
+    TileManager tile_manager(m_runtime_context, scheduler, parameters);
+    if (tile_manager.ScratchPoolBytes().second == 0) {
+      std::printf("TilerScratchHold: skipped (KYTY_TILER_SCRATCH_POOL=0)\n");
+      return;
+    }
+    constexpr uint64_t size = 64ull * 1024; // one 64 KiB size class
+    const auto pooled = [&] { return tile_manager.ScratchPoolBytes().first; };
+
+    // Without a hold the release is stamped with the allocating tick: once it completes, the
+    // pool hands the same buffer out again.
+    const auto first = tile_manager.GetScratchBuffer(size);
+    scheduler.Finish();
+    const auto again = tile_manager.GetScratchBuffer(size);
+    Require(name, "unheld release", again.buffer == first.buffer && pooled() == 0,
+            "an unheld scratch buffer did not return to the pool after its tick");
+    scheduler.Finish();
+    Require(name, "unheld pool", pooled() == size, "the pool lost a released buffer");
+
+    vk::Buffer held_buffer = nullptr;
+    {
+      const TileManager::ScratchHold hold(tile_manager);
+      const auto held = tile_manager.GetScratchBuffer(size);
+      held_buffer = held.buffer;
+      // The allocating tick is submitted and completes, as when a stream wrap submits it.
+      scheduler.Finish();
+      Require(name, "held across a submission", pooled() == 0,
+              "a held scratch buffer returned to the pool while its operation was running");
+      const auto other = tile_manager.GetScratchBuffer(size);
+      Require(name, "held not reused", other.buffer != held.buffer,
+              "a held scratch buffer was handed out again before its last use");
+      // The operation's last use is in the new tick.
+      scheduler.Current().Handle().fillBuffer(held.buffer, 0, size, 0x5a5a5a5au);
+      {
+        const TileManager::ScratchHold nested(tile_manager);
+        (void)tile_manager.GetScratchBuffer(size);
+      }
+      scheduler.Finish();
+      Require(name, "nested hold", pooled() == 0,
+              "an inner hold released buffers before the outermost hold ended");
+    }
+    Require(name, "released at the last tick", pooled() == 0,
+            "held scratch buffers returned to the pool before their last tick completed");
+    scheduler.Finish();
+    Require(name, "released after the last tick", pooled() == 3 * size,
+            "held scratch buffers did not return to the pool after their last tick");
+    const auto reused = tile_manager.GetScratchBuffer(size);
+    Require(name, "pool reuse", reused.buffer != nullptr && held_buffer != nullptr,
+            "the pool could not hand out a released buffer");
+    scheduler.Finish();
+    std::printf("TilerScratchHold: OK\n");
+  }
+
   void CheckTilerImageDirect() {
     constexpr const char *name = "TilerImageDirect";
     EnsureRuntimeContext();
@@ -57813,6 +57880,12 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckGpuTilerCpuParity();
     vulkan.CheckTilerImageDirect();
+    vulkan.CheckTilerScratchHold();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--tiler-scratch-hold-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckTilerScratchHold();
     return 0;
   }
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -58696,6 +58769,7 @@ int main(int argc, char **argv) {
   CheckDetileCopyCoverage();
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckTilerImageDirect();
+  vulkan.CheckTilerScratchHold();
   vulkan.CheckNativeIndirectDispatch();
   CheckComputeLdsLimit(vulkan);
   vulkan.CheckDrawPrepCertifiedShaderHash();

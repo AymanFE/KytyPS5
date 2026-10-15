@@ -1403,6 +1403,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --context-state-only)
 	add_test(NAME gpu_tiler
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-tiler-only)
+	add_test(NAME tiler_scratch_hold
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tiler-scratch-hold-only)
 	add_test(NAME tile_layout
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tile-layout-only)
 	add_test(NAME image_transfer_layout

@@ -4461,6 +4461,13 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	if (dst_memory && preserve_images) {
 		m_texture_cache.InvalidateMemoryFromGPU(dst_vaddr, size);
 	}
+	if (src_memory && src->is_deleted) {
+		// Obtaining the destination created a buffer that joined (and deleted) the source's. The
+		// deleted buffer is freed once the current tick completes, and that synchronization may
+		// already have submitted the tick the join was recorded in: copy from the joined buffer.
+		std::tie(src, src_offset) = ObtainBuffer(src_vaddr, size, false, true, BufferId {});
+		EXIT_IF(src->is_deleted);
+	}
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
 }
 

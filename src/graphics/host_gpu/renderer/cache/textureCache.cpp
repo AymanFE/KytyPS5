@@ -991,6 +991,8 @@ void TextureCache::RestrictToResidentLevels(const Image& image, TextureTransfer&
 }
 
 void TextureCache::PoisonNonResidentLevels(Image& image) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	// KYTY_TEXTURE_RESIDENT_MIPS=poison: fill the levels no view may sample with a marker
 	// (magenta/green texels) so any read of a non-resident level shows on screen.
 	auto transfer = BuildTextureTransfer(image, BindingType::Texture, TransferDirection::Upload);
@@ -1557,6 +1559,8 @@ bool TextureCache::KeepGpuBytes(Image& image, uint64_t address, uint64_t size, b
 }
 
 TextureCache::PartialUploadResult TextureCache::UploadKeptRanges(Image& image) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	PartialUploadResult result;
 	const auto          base = image.live.address;
 	if (!image.HasKeptDirty() || !image.IsGpuModified() || !image.OwnsAllBytes() ||
@@ -1652,6 +1656,8 @@ TextureCache::PartialUploadResult TextureCache::UploadKeptRanges(Image& image) {
 }
 
 bool TextureCache::UploadKeptDepthLayers(Image& image, PartialUploadResult& result) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	const auto& info   = image.info;
 	const auto  layers = info.resources.layers;
 	if (info.samples != 1 || image.backing.samples != 1 || layers < 2 || info.resources.levels != 1 ||
@@ -1922,6 +1928,8 @@ void TextureCache::RefreshCopySource(ImageId id) {
 }
 
 bool TextureCache::CopyD16(Image& destination, Image& source) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	const bool source_depth      = source.info.IsDepth();
 	const bool destination_depth = destination.info.IsDepth();
 	if (source_depth == destination_depth) {
@@ -2559,6 +2567,8 @@ TextureCache::ImageDownload TextureCache::BuildDownload(const Image& image) cons
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	auto& destination = image.depth_id ? m_slot_images[image.depth_id] : image;
 	const auto binding = image.depth_id ? BindingType::DepthTarget : UploadBinding(image);
 	const auto  upload  = [&](std::vector<vk::BufferImageCopy>& copies, TileManager::Result linear) {
@@ -2814,6 +2824,8 @@ void TextureCache::InitializeImage(ImageId id, RefreshIntent intent) {
 }
 
 TextureCache::PartialUploadResult TextureCache::TryPartialUpload(Image& image) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	PartialUploadResult result;
 	const auto&         info = image.info;
 	auto&               chunks = image.chunks;
@@ -3009,6 +3021,8 @@ TextureCache::PartialUploadResult TextureCache::TryPartialUpload(Image& image) {
 }
 
 bool TextureCache::TryAsyncFullUpload(Image& image) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	const auto& info = image.info;
 	if (!m_staging_copier || image.depth_id || image.IsBufferModified() || info.samples != 1 ||
 	    image.backing.samples != 1 || !info.IsTiled() || info.IsDepth() ||
@@ -5167,6 +5181,8 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 
 void TextureCache::DownloadDepth(Image& image, vk::Buffer destination, uint64_t destination_offset,
                                  uint64_t destination_capacity) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	const auto&    info             = image.info;
 	const auto     layers           = info.resources.layers;
 	const auto     full_slice_size  = info.data.size / layers;
@@ -5231,6 +5247,8 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 void TextureCache::DownloadImageTo(Image& image, vk::Buffer destination,
                                    uint64_t destination_offset, uint64_t destination_capacity,
                                    uint64_t destination_size, ImageDownload transfer) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	if (!transfer.valid) {
 		EXIT("TextureCache: invalid image download transfer\n");
 	}
@@ -5360,6 +5378,8 @@ void TextureCache::TakeOverOwnedBytes(Image& destination, Image& source) {
 
 uint64_t TextureCache::MaterializeOwnedBytes(GuestRange range, ImageId only, ImageId except,
                                              const char* reason, Buffer* target) {
+	// Scratch buffers from the tiler stay alive until this operation's last tick (tiler.h).
+	const TileManager::ScratchHold scratch_hold(m_tiler);
 	if (!AliasBytesEnabled() || range.Empty() || !m_scheduler.Active() ||
 	    m_scheduler.Current().IsInvalid()) {
 		return 0;

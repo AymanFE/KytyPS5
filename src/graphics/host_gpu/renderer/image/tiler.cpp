@@ -194,7 +194,10 @@ TileManager::Scratch TileManager::AllocateScratch(uint64_t size) {
 	auto result = vmaCreateBuffer(m_graphics.allocator, &raw, &allocate, &buffer, &memory, nullptr);
 	if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
 		// VRAM ran short (cards with less memory): the pool holds only buffers whose GPU work has
-		// completed, so free all of them and retry once before giving up.
+		// completed, so free all of them and retry once before giving up. That holds because a
+		// buffer enters the pool only from ReleaseScratch, which runs once the tick of its last use
+		// completed (DeferRelease; callers that use a buffer across a possible submission hold a
+		// ScratchHold, so its release is stamped after that use). Held buffers are not in the pool.
 		std::vector<Scratch> idle;
 		{
 			std::scoped_lock lock(m_scratch_mutex);
@@ -255,6 +258,39 @@ void TileManager::TrimScratchPool() {
 }
 
 void TileManager::DeferDestroy(Scratch scratch) {
+	{
+		std::scoped_lock lock(m_hold_mutex);
+		if (m_hold_depth != 0) {
+			// A ScratchHold is open: its caller may still use the buffer in a later tick.
+			m_held.push_back(scratch);
+			return;
+		}
+	}
+	DeferRelease(scratch);
+}
+
+void TileManager::BeginScratchHold() {
+	std::scoped_lock lock(m_hold_mutex);
+	m_hold_depth++;
+}
+
+void TileManager::EndScratchHold() {
+	std::vector<Scratch> held;
+	{
+		std::scoped_lock lock(m_hold_mutex);
+		EXIT_IF(m_hold_depth == 0);
+		if (--m_hold_depth != 0) {
+			return;
+		}
+		held.swap(m_held);
+	}
+	// Every command using these buffers was recorded in this tick or an earlier one.
+	for (const auto& scratch: held) {
+		DeferRelease(scratch);
+	}
+}
+
+void TileManager::DeferRelease(Scratch scratch) {
 	if (m_scratch_pool_limit != 0) {
 		// Runs once the scheduler tick that uses the buffer has completed.
 		m_scheduler.DeferOperation([this, scratch] { ReleaseScratch(scratch); });
