@@ -2471,6 +2471,12 @@ option(KYTY_EMULATOR_IPO "Enable release interprocedural optimization for the em
 if(KYTY_EMULATOR_IPO)
 	set_property(TARGET kyty_emulator PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
+# OFF compiles out the command processor's per-draw diagnostics (KYTY_CP_COMMIT_STATS,
+# KYTY_BUFFER_LOOKUP_STATS; commitStats.h). Only the emulator target: the tests keep them.
+option(KYTY_CP_DIAGNOSTICS "Command-processor per-draw diagnostics (KYTY_CP_COMMIT_STATS, KYTY_BUFFER_LOOKUP_STATS)" ON)
+if(NOT KYTY_CP_DIAGNOSTICS)
+	target_compile_definitions(kyty_emulator PRIVATE KYTY_CP_DIAGNOSTICS=0)
+endif()
 set(KYTY_TROPHY_UNLOCK_SOUND "${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/trophy-unlock.wav")
 add_custom_target(kyty_trophy_sound
 	COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kyty_emulator>/assets/sounds"
