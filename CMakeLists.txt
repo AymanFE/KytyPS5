@@ -1204,6 +1204,11 @@ if(BUILD_TESTING)
 	add_test(NAME profiler_counters COMMAND $<TARGET_FILE:profiler_counter_tests>)
 	add_test(NAME cpu_placement COMMAND $<TARGET_FILE:cpu_placement_tests>)
 	add_test(NAME cpu_placement_recorder COMMAND $<TARGET_FILE:cpu_placement_tests> --mode cp+recorder)
+	add_test(NAME cpu_placement_vcache_sets COMMAND $<TARGET_FILE:cpu_placement_tests> --vcache sets)
+	add_test(NAME cpu_placement_vcache_affinity
+	         COMMAND $<TARGET_FILE:cpu_placement_tests> --vcache affinity)
+	add_test(NAME cpu_placement_vcache_pending
+	         COMMAND $<TARGET_FILE:cpu_placement_tests> --vcache pending)
 	add_test(NAME live_switch COMMAND $<TARGET_FILE:live_switch_tests>)
 	add_test(NAME lod_stats_report COMMAND $<TARGET_FILE:lod_stats_report_tests>)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
