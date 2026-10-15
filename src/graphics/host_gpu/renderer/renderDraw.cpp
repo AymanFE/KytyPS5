@@ -7,7 +7,6 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hangTrace.h"
-#include "common/liveSwitch.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
@@ -67,14 +66,6 @@
 #include <xxhash.h>
 
 namespace Libs::Graphics {
-
-// KYTY_CP_RECORDER_DRAW_GROUP (default on, live): with the CP recorder, a draw's emission tail
-// (vertex/index binds, descriptor pushes, dynamic state, the rendering begin, the pipeline bind and
-// the draw) is encoded as one packet group: one ring reservation and one commit and consumer wake
-// per draw instead of one per command (render.h, CommandBuffer::PacketGroup). 0: one per command.
-static Live::Switch g_draw_packet_group("KYTY_CP_RECORDER_DRAW_GROUP", Live::ParseDefaultOn);
-// Reserved per group; a packet that does not fit the rest ends the group and is encoded alone.
-constexpr uint32_t DrawPacketGroupBytes = 16u << 10u;
 
 static bool MeshRestartEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
@@ -3845,7 +3836,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// Emission safe point (KYTY_CP_RECORDER): no native handle obtained during the preparation above
 	// is alive; from here the draw's commands go to the recorder (render.h, CommandBuffer::Sink).
 	const auto vk_buffer = buffer.EmissionSink();
-	CommandBuffer::PacketGroup packet_group(buffer, DrawPacketGroupBytes, g_draw_packet_group.On());
 	SetDrawDebugPhase(buffer, submit_id, draw, emit, draw.IsIndexed() ? 0x100u : 0x200u);
 	CommitStats::StepMark(CommitStats::Step::DrawScope);
 	if (!mesh_active) {
@@ -4039,7 +4029,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
-	packet_group.End();
 	draw_cmd_scope.Stop();
 	CommitStats::StepMark(CommitStats::Step::DrawCmd);
 	static const bool occlusion_draw_rows = [] {

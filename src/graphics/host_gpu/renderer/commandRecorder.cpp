@@ -641,8 +641,6 @@ void CommandRecorder::Submit(const CommandStream::SubmitPacket& submit) {
 }
 
 void CommandRecorder::Drain(const void* site_key, bool is_site) {
-	// An open packet group's packets are not committed yet: the idle check below must see them.
-	m_encoder.EndGroup();
 	const CpGaps::Scope gap(CpGaps::Cat::RecorderWait);
 	HangWatchdog::Scope wait("recorder-drain", reinterpret_cast<uint64_t>(this),
 	                         HangWatchdog::Enabled() ? m_ring.WritePosition() : 0,
@@ -690,7 +688,6 @@ void CommandRecorder::WaitRecorded(uint64_t tick, bool from_producer) {
 	HangWatchdog::Scope wait("recorder-recorded-tick", reinterpret_cast<uint64_t>(this), tick,
 	                         HangWatchdog::Enabled() ? m_recorded_tick.load() : 0);
 	if (from_producer) {
-		m_encoder.EndGroup();
 		m_ring.Kick(m_encoder.Stats());
 	}
 	const auto start = NowNs();
@@ -722,7 +719,6 @@ void CommandRecorder::Stop() {
 	}
 	m_stopped = true;
 	m_test_stall.store(false, std::memory_order_release);
-	m_encoder.EndGroup();
 	if (m_mode == Mode::Thread) {
 		m_ring.WaitConsumed(m_ring.WritePosition(), m_drain_policy, m_drain_stats);
 		m_stop.store(true, std::memory_order_seq_cst);

@@ -1044,69 +1044,6 @@ void TestThreadedStream() {
 	Check(state.checks == gen.expected.size(), "threaded: every packet verified");
 }
 
-void TestPacketGroups() {
-	// Packet groups (Encoder::BeginGroup): small groups so packets overflow them (the group is
-	// committed and a new one begun), a 128 KiB ring so groups wrap, drains and submits that end a
-	// group early, and a threaded consumer: every packet is replayed once, in order, verified.
-	Ring             ring(128u << 10u);
-	Encoder::Options options;
-	options.verify = true;
-	Encoder     encoder(ring, options);
-	Generator   gen(41);
-	LogExecutor exec;
-	ReplayState state;
-	state.verify = true;
-	MismatchLog       mismatches;
-	std::atomic<bool> stop {false};
-	std::thread       consumer([&] {
-        WaitStats  stats;
-        WaitPolicy policy;
-        while (!stop.load()) {
-            if (!ring.WaitPublished(stop, policy, stats)) {
-                continue;
-            }
-            ConsumeAll(ring, exec, state, mismatches, stats);
-        }
-        ConsumeAll(ring, exec, state, mismatches, stats);
-    });
-	uint64_t tick           = 1;
-	uint64_t grouped_rounds = 0;
-	for (uint32_t round = 0; round < 3000; round++) {
-		gen.EmitBegin(encoder, tick);
-		const auto groups = 1 + gen.Below(3);
-		for (uint32_t g = 0; g < groups; g++) {
-			encoder.BeginGroup(256u + 64u * gen.Below(32));
-			Check(encoder.GroupOpen(), "groups: a group opens");
-			const auto commands = gen.Below(12);
-			for (uint32_t i = 0; i < commands; i++) {
-				const auto op = static_cast<Op>(static_cast<uint32_t>(kFirstCommand) +
-				                                gen.Below(static_cast<uint32_t>(Op::Count) -
-				                                          static_cast<uint32_t>(kFirstCommand)));
-				gen.Emit(encoder, op, 1 + gen.Below(24));
-			}
-			if (gen.Below(10) == 0) {
-				// A drain inside a group commits the group first.
-				const auto end = gen.EmitDrain(encoder, round);
-				Check(!encoder.GroupOpen(), "groups: a drain marker ends the group");
-				ring.WaitConsumed(end, options.policy, encoder.Stats());
-			}
-			gen.Emit(encoder, Op::DrawIndexed, 1);
-			encoder.EndGroup();
-			grouped_rounds++;
-		}
-		gen.EmitSubmit(encoder, tick++);
-	}
-	ring.WaitConsumed(ring.WritePosition(), options.policy, encoder.Stats());
-	stop = true;
-	ring.WakeConsumer();
-	consumer.join();
-	Check(grouped_rounds > 3000, "groups: groups were encoded");
-	Check(exec.calls == gen.expected, "groups: all packets in order");
-	Check(mismatches.entries.empty(), "groups: no verify mismatch");
-	Check(state.checks == gen.expected.size(), "groups: every packet verified");
-	Check(ring.WritePosition() > 8u * ring.Capacity(), "groups: the ring wrapped");
-}
-
 void TestVerifyDetectsCorruption() {
 	Ring             ring(1u << 20u);
 	Encoder::Options options;
@@ -1283,7 +1220,6 @@ int main(int argc, char** argv) {
 	TestRoundTrip(true);
 	TestWrapAndBackPressure();
 	TestThreadedStream();
-	TestPacketGroups();
 	TestVerifyDetectsCorruption();
 	TestSites();
 	if (argc > 1 && std::strcmp(argv[1], "--bench") == 0) {

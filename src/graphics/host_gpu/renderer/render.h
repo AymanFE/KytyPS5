@@ -245,31 +245,6 @@ public:
 	[[nodiscard]] CommandSink HelperSink() const;
 	// Marks an emission safe point without a sink.
 	void BeginEmission() const { CloseDirectWindow(); }
-	// KYTY_CP_RECORDER: the packets encoded while one is alive form one ring reservation and one
-	// commit (CommandStream::Encoder::BeginGroup), e.g. a draw's emission tail after EmissionSink().
-	// Nothing without the recorder, inside a direct window, or with `enabled` false; a drain ends
-	// the group early. Commands keep their order and their packets.
-	class PacketGroup {
-	public:
-		PacketGroup(const CommandBuffer& buffer, uint32_t reserve, bool enabled) noexcept
-		    : m_encoder(enabled && buffer.Encoding() ? buffer.m_encoder : nullptr) {
-			if (m_encoder != nullptr) {
-				m_encoder->BeginGroup(reserve);
-			}
-		}
-		~PacketGroup() { End(); }
-		void End() noexcept {
-			if (m_encoder != nullptr) {
-				m_encoder->EndGroup();
-				m_encoder = nullptr;
-			}
-		}
-		PacketGroup(const PacketGroup&)            = delete;
-		PacketGroup& operator=(const PacketGroup&) = delete;
-
-	private:
-		CommandStream::Encoder* m_encoder;
-	};
 	// The native command buffer being recorded, for identity comparisons only (Image::Transit
 	// targets, the dynamic-state shadow). Never record through it.
 	[[nodiscard]] vk::CommandBuffer Identity() const noexcept { return m_buffer; }

@@ -821,23 +821,7 @@ Encoder::Writer Encoder::Open(Op op, uint64_t payload, bool barrier) {
 		EXIT("CommandStream: %s packet of %" PRIu64 " bytes exceeds the ring's packet limit %u\n",
 		     OpName(op), bytes, m_ring.MaxPacket());
 	}
-	uint8_t* base = nullptr;
-	if (m_group_base != nullptr) {
-		if (bytes > m_group_capacity - m_group_used) {
-			// Commit the group so far and continue in a new one when the packet fits one.
-			const auto capacity = m_group_capacity;
-			EndGroup();
-			if (bytes <= capacity) {
-				BeginGroup(capacity);
-			}
-		}
-		if (m_group_base != nullptr) {
-			base = m_group_base + m_group_used;
-		}
-	}
-	if (base == nullptr) {
-		base = m_ring.Reserve(static_cast<uint32_t>(bytes), m_options.policy, m_stats);
-	}
+	auto* base      = m_ring.Reserve(static_cast<uint32_t>(bytes), m_options.policy, m_stats);
 	auto* header    = reinterpret_cast<Header*>(base);
 	header->op      = op;
 	header->flags   = static_cast<uint16_t>((site ? FlagSite : 0u) | (verify ? FlagVerify : 0u));
@@ -871,12 +855,6 @@ void Encoder::Close(Writer& writer, uint64_t hash) {
 	m_packets++;
 	m_bytes += writer.Size();
 	const auto op = writer.GetHeader()->op;
-	if (m_group_base != nullptr) {
-		// Committed with the group (EndGroup).
-		m_group_used += writer.Size();
-		m_group_kick = m_group_kick || KicksConsumer(op);
-		return;
-	}
 	m_ring.Commit(writer.Size());
 	if (KicksConsumer(op)) {
 		m_ring.Kick(m_stats);
@@ -888,35 +866,7 @@ void Encoder::Close(Writer& writer, uint64_t hash) {
 	}
 }
 
-void Encoder::BeginGroup(uint32_t reserve) {
-	if (m_group_base != nullptr || m_options.after_commit != nullptr) {
-		return;
-	}
-	reserve = static_cast<uint32_t>(std::clamp<uint64_t>(Align8(reserve), 8, m_ring.MaxPacket()));
-	m_group_base     = m_ring.Reserve(reserve, m_options.policy, m_stats);
-	m_group_capacity = reserve;
-	m_group_used     = 0;
-	m_group_kick     = false;
-}
-
-void Encoder::EndGroup() noexcept {
-	if (m_group_base == nullptr) {
-		return;
-	}
-	m_group_base = nullptr;
-	if (m_group_used != 0) {
-		m_ring.Commit(m_group_used);
-		if (m_group_kick) {
-			m_ring.Kick(m_stats);
-		}
-	}
-	m_group_capacity = 0;
-	m_group_used     = 0;
-	m_group_kick     = false;
-}
-
 void Encoder::Begin(vk::CommandBuffer command, uint64_t tick, uint64_t record_ns) {
-	EndGroup();
 	m_cb_digest  = 0;
 	m_cb_packets = 0;
 	auto w       = Open(Op::Begin, Sz<BeginPacket>(), false);
@@ -925,7 +875,6 @@ void Encoder::Begin(vk::CommandBuffer command, uint64_t tick, uint64_t record_ns
 }
 
 void Encoder::Submit(const SubmitPacket& submit) {
-	EndGroup();
 	SubmitPacket packet = submit;
 	packet.cb_digest    = m_cb_digest;
 	packet.cb_packets   = m_cb_packets;
@@ -935,7 +884,6 @@ void Encoder::Submit(const SubmitPacket& submit) {
 }
 
 uint64_t Encoder::DrainMarker(uint64_t serial) {
-	EndGroup();
 	auto w = Open(Op::DrainMarker, Sz<DrainMarkerPacket>(), false);
 	w.Put(DrainMarkerPacket {serial});
 	Close(w, m_options.verify ? VerifyHash::DrainMarker(serial) : 0);

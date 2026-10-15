@@ -646,16 +646,6 @@ public:
 	// Returns the ring position just past the marker.
 	uint64_t DrainMarker(uint64_t serial);
 
-	// Packet group (a draw's emission tail): one ring reservation of `reserve` bytes for the packets
-	// encoded until EndGroup(), committed (and the consumer woken, if any of them wakes it) once at
-	// the end. The packets keep their own headers, verify blocks and order, so the consumer replays
-	// them exactly as separate packets. A packet that does not fit ends the group and is encoded
-	// alone; Begin, Submit and DrainMarker end it first (the producer may wait for them). Not with
-	// inline replay (after_commit). No-op when a group is already open.
-	void BeginGroup(uint32_t reserve);
-	void EndGroup() noexcept;
-	[[nodiscard]] bool GroupOpen() const noexcept { return m_group_base != nullptr; }
-
 	void beginRendering(const vk::RenderingInfo& info);
 	void endRendering();
 	void pipelineBarrier2(const vk::DependencyInfo& info);
@@ -764,11 +754,6 @@ private:
 	uint64_t  m_bytes      = 0;
 	uint64_t  m_cb_digest  = 0;
 	uint64_t  m_cb_packets = 0;
-	// Open packet group (BeginGroup): reserved region, bytes used, whether a packet in it wakes.
-	uint8_t*  m_group_base     = nullptr;
-	uint32_t  m_group_capacity = 0;
-	uint32_t  m_group_used     = 0;
-	bool      m_group_kick     = false;
 };
 
 class Encoder::Writer {
