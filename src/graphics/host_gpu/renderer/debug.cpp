@@ -674,7 +674,7 @@ static void AaCheck(P& p, const HW::AaSampleControl& c, const HW::AaConfig& cf) 
 	                       cf.msaa_num_samples, cf.msaa_exposed_samples, cf.max_sample_dist);
 }
 
-void LogDrawPhase(const char* draw_name, const char* phase) {
+void LogDrawPhaseSlow(const char* draw_name, const char* phase) {
 	if (graphics_debug_dump_enabled()) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1, std::memory_order_relaxed) < 1024) {

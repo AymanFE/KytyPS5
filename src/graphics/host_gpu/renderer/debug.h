@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DEBUG_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DEBUG_H_
 
+#include "common/emulatorConfig.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <cstdint>
@@ -41,7 +42,15 @@ std::string              rt_print(const char* func, const HW::RenderTarget& rt);
 bool                     RenderIsColorTileModeLinear(Prospero::TileMode tile_mode);
 void                     hw_print(const CommandBuffer& buffer);
 void                     hw_check(const CommandBuffer& buffer);
-void                     LogDrawPhase(const char* draw_name, const char* phase);
+void                     LogDrawPhaseSlow(const char* draw_name, const char* phase);
+// Logged with --graphics-debug-dump (and a printf direction other than Silent). Called several
+// times per draw on the command processor: the inline config check keeps the disabled case a load
+// and a branch instead of a call.
+inline void LogDrawPhase(const char* draw_name, const char* phase) {
+	if (::Config::GraphicsDebugDumpEnabled()) [[unlikely]] {
+		LogDrawPhaseSlow(draw_name, phase);
+	}
+}
 ScissorRect calc_final_scissor(const HW::ScreenViewport& vp, const HW::ScanModeControl& smc,
                                vk::Extent2D extent, uint32_t viewport_index);
 // calc_final_scissor before its clamp to the framebuffer, without its log: false for a clip-rect
