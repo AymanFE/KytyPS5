@@ -107,6 +107,9 @@ static_assert(sizeof(KernelMemoryPoolBlockStats) == 16,
 
 void                   RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
 void                   SetFlexibleMemorySize(uint64_t size);
+// Upstream 259a40abf: an AMM unmap that accepts holes (an AMPR AMM unmap command), 16 KiB
+// aligned. Upstream's MapAutomaticMemory/automatic AllocateDirectMemory are not in this line.
+int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 // TryReadBacking whose destination may hold partial bytes when it fails (the caller discards it
@@ -156,6 +159,7 @@ bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t
 // Upstream's descriptor-dependency reader (57cf08688/783d9f8d6): on the GPU thread, GPU-dirty
 // buffer bytes are read back first, then the backing is read.
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
+bool                   CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 // ClampRangeSize's answer without its log or exit (0: not committed, or no ranges yet). Any thread.
 [[nodiscard]] uint64_t ClampRangeSizeQuiet(uint64_t vaddr, uint64_t size);
@@ -245,6 +249,7 @@ struct TestClampTotals {
 	uint64_t verify_races      = 0;
 };
 TestClampTotals TestClampRangeMemoTotals();
+void     TestSetGpuRangeCallback(void (*callback)(bool mapped, uint64_t addr, size_t size));
 void     TestBeforeNextBackingMap(callback_func_t callback);
 void     TestSetBackingReadCallback(callback_func_t callback);
 // The backing store's sparse read without TryReadSparseBacking's range checks.

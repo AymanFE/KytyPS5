@@ -80,6 +80,9 @@ vk::PhysicalDeviceVulkan12Features WindowContext::RequiredVulkan12Features() noe
 	features.shaderBufferInt64Atomics  = VK_TRUE;
 	features.storageBuffer8BitAccess   = VK_TRUE;
 	features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+	// shaderStorageBufferArrayNonUniformIndexing (required upstream since fd66f580b) is enabled
+	// when supported (GraphicContext::storage_buffer_array_non_uniform_indexing_enabled) instead
+	// of being required.
 	return features;
 }
 
@@ -924,6 +927,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    supported_features2.features.multiDrawIndirect == VK_TRUE;
 	graphics.draw_indirect_count_enabled = supported_features12.drawIndirectCount == VK_TRUE;
 	graphics.sampler_filter_minmax_enabled = supported_features12.samplerFilterMinmax == VK_TRUE;
+	graphics.storage_buffer_array_non_uniform_indexing_enabled =
+	    supported_features12.shaderStorageBufferArrayNonUniformIndexing == VK_TRUE;
+	LOGF("Vulkan storage-buffer array non-uniform indexing: %s (optional)\n",
+	     graphics.storage_buffer_array_non_uniform_indexing_enabled ? "true" : "false");
 	LOGF("Vulkan sampler min/max reduction: %s\n",
 	     graphics.sampler_filter_minmax_enabled ? "true" : "false");
 	graphics.index_type_uint8_enabled =
@@ -1279,6 +1286,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	}
 	features12.drawIndirectCount = graphics.draw_indirect_count_enabled ? VK_TRUE : VK_FALSE;
 	features12.samplerFilterMinmax = graphics.sampler_filter_minmax_enabled ? VK_TRUE : VK_FALSE;
+	features12.shaderStorageBufferArrayNonUniformIndexing =
+	    graphics.storage_buffer_array_non_uniform_indexing_enabled ? VK_TRUE : VK_FALSE;
 	vk::PhysicalDeviceIndexTypeUint8FeaturesKHR index_type_uint8 {};
 	if (graphics.index_type_uint8_enabled) {
 		index_type_uint8.indexTypeUint8 = VK_TRUE;
@@ -1468,6 +1477,11 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 	        });
 
 	r.enable_validation_layers = Config::VulkanValidationEnabled();
+	if (Config::HdrEnabled() &&
+	    HasExtension(r.available_extensions, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) &&
+	    !HasExtension(r.required_extensions, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
+		r.required_extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+	}
 
 	if (HasExtension(r.available_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
 		r.required_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);

@@ -37,6 +37,10 @@ SrtRuntime CleanRuntime(SrtRuntime runtime) {
 namespace {
 
 constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
+// ComputeRawAddress's address for a scalar-buffer read outside the buffer's records: PS5 scalar
+// buffer loads return 0 per out-of-range DWORD, so ReadRawWord answers 0 without reading memory.
+// Not a real read address (reads are DWORD aligned and inside AddressMask).
+constexpr uint64_t OutOfRangeReadAddress = UINT64_MAX;
 constexpr uint32_t MaxFlatReadRun = 16;
 
 const char* StageName(ShaderType stage) {
@@ -89,7 +93,11 @@ bool ComputeRawAddress(bool buffer, int64_t immediate, uint64_t low, uint64_t hi
 		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
 		const auto size = stride == 0u ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 		                              : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
-		if (aligned > size || size - aligned < sizeof(uint32_t)) return false;
+		if (aligned > size || size - aligned < sizeof(uint32_t)) {
+			address   = OutOfRangeReadAddress;
+			available = 0;
+			return true;
+		}
 		available = size - aligned;
 		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
 		return true;
@@ -1410,6 +1418,11 @@ bool SrtWalker::ResolveRecipeReadAddress(const ResourcePlan::EvaluationRecipe& r
 }
 
 bool SrtWalker::ReadRawWord(uint64_t address, uint64_t& result, bool allow_probe) {
+	if (address == OutOfRangeReadAddress) {
+		// Depends only on the evaluated descriptor and offset: nothing to observe.
+		result = 0;
+		return true;
+	}
 	uint32_t word = 0;
 	if (m_runtime.read_memory != nullptr) {
 		if (!m_runtime.read_memory(m_runtime.userdata, address, {&word, 1})) {
@@ -3270,8 +3283,17 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 				uint64_t   address   = 0;
 				uint64_t   available = 0;
 				if (!ComputeRawAddress(buffer, op.imm, v[0], v[1], v[2], buffer ? v[3] : 0u,
-				                       address, available) ||
-				    static_cast<uint64_t>(words) * sizeof(uint32_t) > available ||
+				                       address, available)) {
+					m_fail = "guard: flat run bounds";
+					return false;
+				}
+				if (address == OutOfRangeReadAddress && words == 1u) {
+					// A one-word run past the buffer's records reads 0, as the walk does.
+					stash[0] = 0u;
+					value    = 0u;
+					break;
+				}
+				if (static_cast<uint64_t>(words) * sizeof(uint32_t) > available ||
 				    address > AddressMask - static_cast<uint64_t>(words) * sizeof(uint32_t)) {
 					m_fail = "guard: flat run bounds";
 					return false;

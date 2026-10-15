@@ -1836,7 +1836,8 @@ bool CommandProcessor::ProcessPacket(Pm4Execution& execution) {
 	const auto        opcode        = (packet_header >> 8u) & 0xffu;
 	EXIT_NOT_IMPLEMENTED(remaining_dw > total_dw);
 
-	if (packet_header == 0x80000000u) {
+	// Type-2 padding and one-word NOP reservations (Pm4::PacketSizeDw, upstream 4c8fc53a8).
+	if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
 		cursor.offset_dw++;
 		execution.m_made_progress = true;
 		CountPacket(execution, packet, 1, execution.m_packets, execution.m_packets_hash,
@@ -2763,7 +2764,8 @@ void CommandProcessor::ExecDispatchDirect(const CpSeq::DispatchDirectOp& op) {
 			                        thread_group_x, thread_group_y, thread_group_z, mode);
 		}
 		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, command, thread_group_x,
-		                                              thread_group_y, thread_group_z, mode);
+		                                              thread_group_y, thread_group_z, mode,
+		                                              IsAsyncComputeQueue());
 		MaybeFlushIdleGpu();
 	}
 }
@@ -2822,7 +2824,7 @@ void CommandProcessor::ExecDispatchIndirect(const CpSeq::DispatchIndirectOp& op)
 		return;
 	}
 	m_renderer.GetRenderExecutor().DispatchIndirect(m_submit_id, CurrentBuffer(), op.args_addr,
-	                                                op.mode);
+	                                                op.mode, IsAsyncComputeQueue());
 	MaybeFlushIdleGpu();
 }
 

@@ -16,6 +16,7 @@
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/frontend/translate/Translate.h"
+#include "graphics/shader/recompiler/frontend/translate/Translator.h"
 #include "graphics/shader/recompiler/ir/IREmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
@@ -1974,14 +1975,18 @@ void TestSopkCompareImmediateExtension() {
 
 void TestDisabledDebugBranches() {
   using namespace ShaderRecompiler;
-  // Both debug branches fall through when conditional shader debugging is disabled.
+  // Debug branches fall through when conditional shader debugging is disabled.
   // Retain the post-ENDPGM helper displacement from PPSA08709 and exercise the
   // OR_USER variant encountered in PPSA03671 with the same body.
-  for (const auto opcode : {Decoder::Opcode::S_CBRANCH_CDBGSYS,
-                            Decoder::Opcode::S_CBRANCH_CDBGSYS_OR_USER}) {
+  const std::pair<uint32_t, Decoder::Opcode> branches[] = {
+      {0x17, Decoder::Opcode::S_CBRANCH_CDBGSYS},
+      {0x18, Decoder::Opcode::S_CBRANCH_CDBGUSER},
+      {0x19, Decoder::Opcode::S_CBRANCH_CDBGSYS_OR_USER},
+      {0x1a, Decoder::Opcode::S_CBRANCH_CDBGSYS_AND_USER}};
+  for (const auto [encoding, opcode] : branches) {
     std::array<uint32_t, 274> shader;
     shader.fill(EncodeSopp(0x00));
-    shader[0] = EncodeSopp(opcode == Decoder::Opcode::S_CBRANCH_CDBGSYS ? 0x17 : 0x19, 0x10f);
+    shader[0] = EncodeSopp(encoding, 0x10f);
     shader[1] = EncodeVop1(0x01, 1, 129);
     shader[2] = EncodeMubuf0(0x1c, 0, false);
     shader[3] = EncodeMubuf1(1, 0, 0);
@@ -1991,6 +1996,7 @@ void TestDisabledDebugBranches() {
     Decoder::Program decoded;
     Decoder::DecodeProgram(shader, decoded);
     Check(decoded.instructions.front().opcode == opcode &&
+              decoded.instructions.front().opcode_id == encoding &&
               decoded.instructions.front().branch_target == 0x440u &&
               decoded.instructions.back().pc == 0x43cu &&
               decoded.instructions.back().opcode == Decoder::Opcode::S_ENDPGM,
@@ -4852,34 +4858,92 @@ void TestNewShaderDecoderArchitecture() {
         "VOP2 DPP V_PK_FMAC_F16 lost its implicit packed modifiers");
 }
 
-void TestNewShaderRecompilerRejectsDppOn64BitCompares() {
-  const uint32_t opcodes[] = {
-      0xa2u, 0xa5u, 0xb5u, 0xe2u, 0xe4u, 0xe5u,
-      0xf5u}; // eq_i64, ne_i64, cmpx_ne_i64, eq_u64, gt_u64, ne_u64, cmpx_ne_u64
-  for (const auto opcode : opcodes) {
-    const uint32_t shader[] = {
-        EncodeVopc(opcode, 250u, 0u), // DPP escape in SRC0
-        EncodeVop2Dpp(0u),
-        0xbf810000u,
-    };
-
-    ShaderRecompiler::Decoder::Program program;
-    ShaderRecompiler::Decoder::DecodeProgram(shader, program);
-    Check(program.instructions.size() == 2u,
-          "64-bit VOPC DPP decode did not consume its modifier word");
-    const auto &compare = program.instructions.front();
-    Check(compare.opcode == ShaderRecompiler::Decoder::Opcode::UNSUPPORTED,
-          "64-bit VOPC illegally accepted a DPP modifier");
-    Check((compare.unsupported_reason.find("VOPC DPP modifier is not supported for opcode") != std::string::npos),
-          "64-bit VOPC DPP rejection reason was not explicit");
+void TestNewShaderRecompilerInteger64CompareEncodings() {
+  namespace D = ShaderRecompiler::Decoder;
+  using O = D::Opcode;
+  const O families[][8] = {
+      {O::V_CMP_F_I64, O::V_CMP_LT_I64, O::V_CMP_EQ_I64, O::V_CMP_LE_I64,
+       O::V_CMP_GT_I64, O::V_CMP_NE_I64, O::V_CMP_GE_I64, O::V_CMP_T_I64},
+      {O::V_CMPX_F_I64, O::V_CMPX_LT_I64, O::V_CMPX_EQ_I64, O::V_CMPX_LE_I64,
+       O::V_CMPX_GT_I64, O::V_CMPX_NE_I64, O::V_CMPX_GE_I64, O::V_CMPX_T_I64},
+      {O::V_CMP_F_U64, O::V_CMP_LT_U64, O::V_CMP_EQ_U64, O::V_CMP_LE_U64,
+       O::V_CMP_GT_U64, O::V_CMP_NE_U64, O::V_CMP_GE_U64, O::V_CMP_T_U64},
+      {O::V_CMPX_F_U64, O::V_CMPX_LT_U64, O::V_CMPX_EQ_U64, O::V_CMPX_LE_U64,
+       O::V_CMPX_GT_U64, O::V_CMPX_NE_U64, O::V_CMPX_GE_U64, O::V_CMPX_T_U64}};
+  const uint32_t bases[] = {0xa0u, 0xb0u, 0xe0u, 0xf0u};
+  for (uint32_t family = 0; family < std::size(families); ++family) {
+    const bool update_exec = (family % 2) != 0;
+    for (uint32_t predicate = 0; predicate < 8; ++predicate) {
+      const auto encoding = bases[family] + predicate;
+      for (const bool vop3 : {false, true}) {
+        const std::array<uint32_t, 2> words = vop3
+            ? std::array{EncodeVop3Word0(encoding, 20),
+                         EncodeVop3Word1(257, 259, 0)}
+            : std::array{EncodeVopc(encoding, 257, 3), 0xbf810000u};
+        D::Instruction compare;
+        D::DecodeInstruction(words, 0, compare);
+        const auto destination = update_exec ? D::OperandKind::ExecLo
+            : vop3 ? D::OperandKind::Sgpr : D::OperandKind::VccLo;
+        Check(compare.family == (vop3 ? D::Family::VOP3 : D::Family::VOPC) &&
+                  compare.opcode == families[family][predicate] &&
+                  compare.opcode_id == encoding &&
+                  compare.word_count == (vop3 ? 2u : 1u) &&
+                  compare.dst.kind == destination &&
+                  (!vop3 || update_exec || compare.dst.reg == 20) &&
+                  compare.src_count == 2 &&
+                  compare.src0.kind == D::OperandKind::Vgpr && compare.src0.reg == 1 &&
+                  compare.src1.kind == D::OperandKind::Vgpr && compare.src1.reg == 3,
+              "64-bit integer compare decoded incorrectly");
+        for (const bool high_src0 : {false, true}) {
+          // Only the compare's pair width makes v13 reachable by MOVRELD,
+          // including predicates F/T that never read their operands.
+          const uint32_t src0 = high_src0 ? 268u : 266u;
+          const uint32_t src1 = high_src0 ? 10u : 12u;
+          std::vector<uint32_t> shader{EncodeVop1(0x42, 12, 256)};
+          if (vop3) {
+            shader.push_back(EncodeVop3Word0(encoding, 20));
+            shader.push_back(EncodeVop3Word1(src0, src1 + 256, 0));
+          } else {
+            shader.push_back(EncodeVopc(encoding, src0, src1));
+          }
+          shader.push_back(EncodeSopp(0x01));
+          D::Program decoded;
+          D::DecodeProgram(shader, decoded);
+          ShaderComputeInputInfo compute{};
+          ShaderRecompiler::Frontend::TranslateOptions options{.stage = ShaderType::Compute};
+          options.input_info.compute = &compute;
+          const auto program = ShaderRecompiler::Frontend::TranslateProgram(
+              decoded, ShaderRecompiler::CFG::BuildGraph(decoded), options);
+          bool includes_high_word = false;
+          for (const auto *block : program.blocks) {
+            for (const auto &inst : *block) {
+              includes_high_word |=
+                  inst.GetOpcode() == ShaderRecompiler::IR::ValueOpcode::SetVectorRegister &&
+                  ShaderRecompiler::IR::RegIndex(inst.Arg(0).VectorRegister()) == 13;
+            }
+          }
+          Check(includes_high_word, "64-bit compare omitted a VGPR pair's high word");
+        }
+      }
+      for (const bool dpp : {false, true}) {
+        const uint32_t shader[] = {
+            EncodeVopc(encoding, dpp ? 250u : 249u, 3),
+            dpp ? EncodeVop2Dpp(1) : EncodeVopcSdwa(1),
+            0xbf810000u};
+        D::Program program;
+        D::DecodeProgram(shader, program);
+        Check(program.instructions.size() == 2u &&
+                  program.instructions.back().opcode == O::S_ENDPGM,
+              "64-bit VOPC decode did not consume its modifier word");
+        const auto &compare = program.instructions.front();
+        const auto reason = dpp ? "VOPC DPP modifier is not supported for opcode"
+                                : "VOPC SDWA modifier is not supported for opcode";
+        Check(compare.opcode == O::UNSUPPORTED && compare.word_count == 2u &&
+                  compare.unsupported_reason.find(reason) != std::string::npos,
+              "64-bit VOPC did not explicitly reject an illegal modifier");
+      }
+    }
   }
-  const uint32_t sdwa[] = {EncodeVopc(0xa5u, 249u, 0u), 0x06060000u};
-  ShaderRecompiler::Decoder::Instruction compare;
-  ShaderRecompiler::Decoder::DecodeInstruction(sdwa, 0u, compare);
-  Check(compare.opcode == ShaderRecompiler::Decoder::Opcode::UNSUPPORTED &&
-            compare.word_count == 2u &&
-            compare.unsupported_reason.find("VOPC SDWA modifier is not supported") != std::string::npos,
-        "V_CMP_NE_I64 accepted an illegal SDWA encoding");
 }
 
 void TestNewShaderRecompilerCapturedVopcSdwaCmpxClass() {
@@ -7962,6 +8026,29 @@ void TestNewShaderRecompilerDsAddtidTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestDsReturningAtomic64Decoder() {
+  using namespace ShaderRecompiler::Decoder;
+  // CS23e96bf5029f62fd: native DATA is the comparison and DATA2 the replacement.
+  const uint32_t max_words[] = {0xd9a00008u, 0x00000400u};
+  const uint32_t cmp_words[] = {0xd9c00010u, 0x0202003fu};
+  Instruction decoded;
+  DecodeInstruction(max_words, 0u, decoded);
+  Check(decoded.opcode == Opcode::DS_MAX_RTN_U64 &&
+            decoded.word_count == 2u && decoded.data_dwords == 2u &&
+            decoded.data_bits == 32u && decoded.src_count == 2u &&
+            decoded.src0.reg == 0u && decoded.src1.reg == 4u &&
+            decoded.dst.reg == 0u && decoded.offset == 8u && !decoded.gds,
+        "captured DS_MAX_RTN_U64 lost its QWORD width, byte offset, or aliases");
+  DecodeInstruction(cmp_words, 0u, decoded);
+  Check(decoded.opcode == Opcode::DS_CMPST_RTN_B64 &&
+            decoded.word_count == 2u && decoded.data_dwords == 2u &&
+            decoded.data_bits == 32u && decoded.src_count == 3u &&
+            decoded.src0.reg == 63u && decoded.src1.reg == 0u &&
+            decoded.src2.reg == 2u && decoded.dst.reg == 2u &&
+            decoded.offset == 16u && !decoded.gds,
+        "captured DS_CMPST_RTN_B64 lost its comparison/replacement pairs or aliases");
+}
+
 void TestDsFloatMinMaxDecoder() {
   using namespace ShaderRecompiler::Decoder;
   for (bool max_value : {false, true}) {
@@ -10259,6 +10346,62 @@ void TestNewShaderRecompilerBranchConditionForms() {
   }
 }
 
+void TestGraphicsComputeGetreg() {
+  using namespace ShaderRecompiler;
+  for (const auto [word, expected] : {std::pair{0xb96a1818u, 6u}, std::pair{0xb96a0a18u, 0u}}) {
+    Decoder::Instruction decoded;
+    Decoder::DecodeInstruction(std::span(&word, 1), 0, decoded);
+    Check(decoded.opcode == Decoder::Opcode::S_GETREG_B32 &&
+              decoded.dst.kind == Decoder::OperandKind::VccLo &&
+              decoded.src0.value == (word & 0xffffu), "GETREG field or VCC destination decoded incorrectly");
+    for (const auto wave : {32u, 64u}) {
+      IR::Program program;
+      program.wave_size = wave;
+      IR::Block block;
+      Frontend::Translator translator(program, &block, 1, false, true);
+      translator.TranslateInstruction(decoded);
+      bool wrote_vcc = false;
+      for (const auto& inst : block) {
+        Check(inst.GetOpcode() != IR::ValueOpcode::SetScc, "GETREG changed SCC");
+        if (inst.GetOpcode() == IR::ValueOpcode::SetVccLo) {
+          Check(inst.Arg(0).IsImmediate() && inst.Arg(0).U32() == expected,
+                "graphics compute hardware field has the wrong value");
+          wrote_vcc = true;
+        }
+      }
+      Check(wrote_vcc, "GETREG did not write VCC_LO");
+    }
+  }
+  const uint32_t shader[] = {0xb96a1818u, EncodeSopp(0x01)};
+  HW::ComputeShaderInfo regs{};
+  regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+  ShaderMappedData mapped{};
+  mapped.code_size_bytes = sizeof(shader);
+  ShaderMapUserData(regs.cs_regs.data_addr, mapped);
+  HW::ShaderRegisters sh{};
+  ShaderComputeInputInfo graphics{}, async{};
+  async.async_compute = true;
+  (void)PrepareProgram(regs, sh, graphics);
+  (void)PrepareProgram(regs, sh, async);
+  Check(!graphics.async_compute && async.async_compute &&
+            MakeStageStaticKey(graphics) != MakeStageStaticKey(async) &&
+            MakeStageStaticKey(graphics).size() == MakeStageStaticKey(async).size(),
+        "compute input reset or cache identity lost queue provenance");
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.input_info.compute = &async;
+  ExpectFatal([&] { (void)TranslateProgram(shader, options); }, "async GETREG used graphics constants");
+  auto vertex = MakeCompileOptions(ShaderType::Vertex);
+  ExpectFatal([&] { (void)TranslateProgram(shader, vertex); }, "vertex GETREG used compute constants");
+  options.input_info.compute = &graphics;
+  const uint32_t unsupported[] = {0xb96af818u, EncodeSopp(0x01)};
+  Decoder::Program decoded;
+  Decoder::DecodeProgram(unsupported, decoded);
+  Check(decoded.instructions[0].src0.value == 0xf818u, "GETREG selector was sign extended");
+  ExpectFatal([&] { (void)TranslateProgram(unsupported, options); }, "unsupported GETREG field was accepted");
+#endif
+}
+
 void TestNewShaderRecompilerSetpcBranch() {
   const uint32_t shader[] = {
       EncodeSop1(0x1f, 4, 0),      // s_getpc_b64 s[4:5]
@@ -12264,7 +12407,7 @@ void TestValuePhiValidation() {
 #endif
 }
 
-void TestWave32MaskProjection() {
+void TestLaneMaskProjection() {
   using namespace ShaderRecompiler::IR;
   for (const uint32_t wave_size : {32u, 64u}) {
     Program program;
@@ -12300,6 +12443,19 @@ void TestWave32MaskProjection() {
           : U32(Value(3u));
       return ir.INotEqual(ir.BitwiseAnd(ir.ShiftRightLogical(word, bit), U32(Value(1u))), zero);
     };
+    const auto low_half = e.ULessThan(U32(e.Emit(ValueOpcode::LaneId)), U32(Value(32u)));
+    const auto mask_bit = [&](uint32_t low, uint32_t high) {
+      const auto word = wave_size == 64u ? e.Select(low_half, U32(Value(low)), U32(Value(high)))
+                                        : U32(Value(low));
+      return thread_bit(e, word);
+    };
+    const auto full = mask_bit(UINT32_MAX, UINT32_MAX);
+    const auto empty = mask_bit(0u, 0u);
+    const auto low_only = mask_bit(UINT32_MAX, 0u);
+    const auto high_only = mask_bit(0u, UINT32_MAX);
+    const auto partial = mask_bit(0x80000000u, 0x80000000u);
+    const auto full_write = e.Select(full, U32(Value(42u)), raw);
+    const auto empty_write = e.Select(empty, U32(Value(42u)), raw);
     const auto active_mask = ballot(e, active);
     const auto direct = thread_bit(e, active_mask);
     const auto arbitrary = thread_bit(e, raw);
@@ -12342,7 +12498,14 @@ void TestWave32MaskProjection() {
     program.block_info[1].condition = remaining_predicate;
 
     ConstantPropagationPass(program.blocks, wave_size);
+    Check(full.Resolve() == Value(true) && empty.Resolve() == Value(false) &&
+              full_write.Resolve() == Value(42u) && empty_write.Resolve() == raw.Resolve(),
+          "constant EXEC mask retained lane extraction or register predication");
+    Check(partial.Resolve().TryInstruction() != nullptr,
+          "partial mask was incorrectly folded to a constant predicate");
     if (wave_size == 32u) {
+      Check(low_only.Resolve() == Value(true) && high_only.Resolve() == Value(false),
+            "wave32 constant mask incorrectly consumed the high half");
       Check(direct.Resolve() == active.Resolve(), "wave32 ballot round trip lost its predicate");
       Check(EquivalentValue(program, combined, combined_predicate),
             "wave32 OR mask projection changed a lane predicate");
@@ -12362,6 +12525,9 @@ void TestWave32MaskProjection() {
                 projected->PhiBlock(1) == loop,
             "mask projection lost loop Phi type or predecessor order");
     } else {
+      Check(low_only.Resolve().TryInstruction() != nullptr &&
+                high_only.Resolve().TryInstruction() != nullptr,
+            "wave64 mixed halves were incorrectly folded to a constant predicate");
       Check(direct.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
                 live.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
                 combined.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
@@ -13023,7 +13189,7 @@ void TestNewShaderRecompilerExpPixelOutputs() {
   options.input_info.pixel = &default_info;
   auto partial_result = RecompileForTest(partial_shader, options);
   const auto partial_source = DisassembleSpirvBinary(partial_result.spirv);
-  Check(SpirvSourceHasInstructionOperand(partial_source, "OpBitcast",
+  Check(SpirvSourceHasInstructionOperand(partial_source, "OpCompositeConstruct",
                                          "%uint_1065353216"),
         "disabled float alpha export did not default to 1.0f bits");
   CheckSpirvBinaryValidates(partial_result.spirv);
@@ -13456,8 +13622,9 @@ void TestLogicalAlphaBlendExport() {
   const auto source = DisassembleSpirvBinary(guest.spirv);
   Check(source.find("OpDecorate %out_mrt_1 Location 0") != std::string::npos &&
             source.find("OpDecorate %out_mrt_1 Index 1") != std::string::npos &&
+            CountSourceOccurrences(source, "OpStore %out_mrt_0 ") == 1 &&
             CountSourceOccurrences(source, "OpStore %out_mrt_1 ") == 1 &&
-            SpirvInstructionOpcodeCount(guest.spirv, 81u) == 8u,
+            !SpirvContainsVectorShuffle(guest.spirv, {3u, 3u, 3u, 3u}),
         "guest dual-source export was replaced by synthetic alpha");
 }
 
@@ -14122,7 +14289,9 @@ void TestSrtWalkerRealSBufferTranslation() {
 
   user_data[10] = 4 * sizeof(uint32_t);
   const auto bounds_walked = ShaderRecompiler::IR::SrtWalker(ir, runtime).RefreshFlatBuffer(flat);
-  Check(!bounds_walked, "real S_BUFFER_LOAD walk ignored descriptor bounds");
+  // PS5 scalar-buffer loads return 0 per out-of-range DWORD (fa0e81bfb).
+  Check(bounds_walked && flat == std::vector<uint32_t>{table[1], table[2], table[3], 0u},
+        "real S_BUFFER_LOAD walk did not zero only the out-of-bounds DWORD");
   CheckFlattenedReadSlots(
       ir, 4, "real S_BUFFER_LOAD patch used the wrong flat offsets");
 
@@ -14889,6 +15058,9 @@ void TestOrdinaryVertexPixelAliases() {
   const uint32_t shader[] = {EncodeExp0(0x20, 0xf), EncodeExp1(0, 1, 2, 3),
                              0xbf810000u};
   ShaderPixelInputInfo pixel{};
+  // Upstream b38b7454a: ordinary draws share the slot through raw vertices; rectangle lists
+  // keep relocating differing flat/smooth aliases, which this checks.
+  pixel.parameter_mode = ShaderPixelParameterMode::Rectangle;
   pixel.input_num = 2;
   pixel.interpolator_settings[1] = 0x400u;
   const std::array<uint32_t, 2> active {0, 1};
@@ -14908,6 +15080,9 @@ void TestVertexPixelAliasLinkingAndValues() {
   using namespace ShaderRecompiler;
   const uint32_t end[] = {0xbf810000u};
   ShaderPixelInputInfo pixel{};
+  // Upstream b38b7454a: ordinary draws share the slot through raw vertices; rectangle lists
+  // keep relocating differing flat/smooth aliases, which this checks.
+  pixel.parameter_mode = ShaderPixelParameterMode::Rectangle;
   pixel.input_num = 4;
   pixel.interpolator_settings[1] = 0x400u;
   pixel.interpolator_settings[2] = 1u;
@@ -15576,7 +15751,7 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--upsync2-only") == 0) {
     TestDisabledDebugBranches();
-    TestWave32MaskProjection();
+    TestLaneMaskProjection();
     TestEmbeddedFetchPreservesSharedScalarLoad();
     TestEmbeddedVertexFormatSwizzle();
     TestValuePhiValidation();
@@ -15673,6 +15848,7 @@ int main(int argc, char **argv) {
   // here.
   TestScalarAshrI64Decoder();
   TestImageAtomicWidthDecoder();
+  TestDsReturningAtomic64Decoder();
   TestDsFloatMinMaxDecoder();
   TestNewShaderDecoderArchitecture();
   TestImageAddressOperands();
@@ -15683,7 +15859,7 @@ int main(int argc, char **argv) {
   TestVopcCmpxClassF16Decoder();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
-  TestNewShaderRecompilerRejectsDppOn64BitCompares();
+  TestNewShaderRecompilerInteger64CompareEncodings();
   TestFloatComparisonInputModes();
   TestPsInputCountRegisterDecode();
   TestPixelAncillaryLayerInput();
@@ -15756,6 +15932,7 @@ int main(int argc, char **argv) {
   TestNewShaderRecompilerImageQueryTranslation();
   TestNewShaderRecompilerBranchConditionForms();
   TestNewShaderRecompilerSetpcBranch();
+  TestGraphicsComputeGetreg();
   TestFusedShaderHandoffPreservesRegisters();
   TestMeshExportStorage();
   TestMeshIndirectParams();
@@ -15773,7 +15950,7 @@ int main(int argc, char **argv) {
   TestFinalSsaRejectsRegisterStatePseudos();
 #endif
   TestValuePhiValidation();
-  TestWave32MaskProjection();
+  TestLaneMaskProjection();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS

@@ -196,6 +196,13 @@ uint32_t EmitAttribute(EmitterState& state, uint32_t attr, uint32_t chan,
 		return value;
 	};
 	if (input->per_vertex) {
+		if (PixelParameterIsFlat(state, attr)) {
+			const auto value = load_per_vertex(
+			    state.input_info.pixel->parameter_mode == ShaderPixelParameterMode::LastVertex ? 2u : 0u);
+			const auto bits  = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
+			return bits;
+		}
 		const auto barycentric_kind = state.input_info.pixel->ps_no_perspective
 		                                  ? IR::StageInputKind::BaryCoordNoPerspective
 		                                  : IR::StageInputKind::BaryCoordSmooth;
@@ -264,8 +271,12 @@ uint32_t EmitInterpolationParameter(ValueEmitContext& ctx, uint32_t attr, uint32
 		return value;
 	};
 
-	const auto selected_vertex = (mode + 1u) % 3u;
-	uint32_t   value           = load_vertex(selected_vertex);
+	uint32_t selected_vertex = (mode + 1u) % 3u;
+	if (mode == 2u && PixelParameterIsFlat(state, attr)) {
+		selected_vertex =
+		    state.input_info.pixel->parameter_mode == ShaderPixelParameterMode::LastVertex ? 2u : 0u;
+	}
+	uint32_t value = load_vertex(selected_vertex);
 	if (!PixelParameterIsCustom(state, attr) && mode < 2u) {
 		const auto delta = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpFSub, TypeF32(state), delta, value, load_vertex(0));
@@ -333,50 +344,46 @@ uint32_t ExportVector(ValueEmitContext& ctx, uint32_t data, const IR::ExportInfo
 		                          f32[0], f32[1], f32[2], f32[3]);
 		return vector;
 	}
-	uint32_t raw[4] = {
-	    ConstantU32(state, 0),
-	    ConstantU32(state, 0),
-	    ConstantU32(state, 0),
-	    ConstantU32(state, uint_output ? 1u : 0x3f800000u),
-	};
-	if (exp.compr) {
-		for (uint32_t pair = 0; pair < 2u; pair++) {
-			if ((exp.en & (3u << (pair * 2u))) == 0u) {
-				continue;
-			}
-			const auto packed = ExportRawComponent(ctx, data, pair);
-			for (uint32_t lane = 0; lane < 2u; lane++) {
-				const auto component = pair * 2u + lane;
-				if (((exp.en >> component) & 1u) == 0u) {
+	if (exp.compr || exp.en != 0xfu) {
+		uint32_t raw[4] = {
+		    ConstantU32(state, 0),
+		    ConstantU32(state, 0),
+		    ConstantU32(state, 0),
+		    ConstantU32(state, uint_output ? 1u : 0x3f800000u),
+		};
+		if (exp.compr) {
+			for (uint32_t pair = 0; pair < 2u; pair++) {
+				if ((exp.en & (3u << (pair * 2u))) == 0u) {
 					continue;
 				}
-				raw[component] = state.builder.AllocateId();
-				state.builder.AddFunction(spv::OpBitFieldUExtract, TypeU32(state), raw[component],
-				                          packed, ConstantU32(state, lane * 16u),
-				                          ConstantU32(state, 16));
+				const auto packed = ExportRawComponent(ctx, data, pair);
+				for (uint32_t lane = 0; lane < 2u; lane++) {
+					const auto component = pair * 2u + lane;
+					if (((exp.en >> component) & 1u) == 0u) {
+						continue;
+					}
+					raw[component] = state.builder.AllocateId();
+					state.builder.AddFunction(spv::OpBitFieldUExtract, TypeU32(state), raw[component],
+					                          packed, ConstantU32(state, lane * 16u),
+					                          ConstantU32(state, 16));
+				}
+			}
+		} else {
+			for (uint32_t component = 0; component < 4u; component++) {
+				if (((exp.en >> component) & 1u) != 0u) {
+					raw[component] = ExportRawComponent(ctx, data, component);
+				}
 			}
 		}
-	} else {
-		for (uint32_t component = 0; component < 4u; component++) {
-			if (((exp.en >> component) & 1u) != 0u) {
-				raw[component] = ExportRawComponent(ctx, data, component);
-			}
-		}
+		data = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), data,
+		                          raw[0], raw[1], raw[2], raw[3]);
 	}
 	if (uint_output) {
-		const auto vector = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), vector,
-		                          raw[0], raw[1], raw[2], raw[3]);
-		return vector;
-	}
-	uint32_t f32[4] {};
-	for (uint32_t component = 0; component < 4u; component++) {
-		f32[component] = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpBitcast, TypeF32(state), f32[component], raw[component]);
+		return data;
 	}
 	const auto vector = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 4), vector, f32[0],
-	                          f32[1], f32[2], f32[3]);
+	state.builder.AddFunction(spv::OpBitcast, TypeF32Vector(state, 4), vector, data);
 	return vector;
 }
 

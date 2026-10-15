@@ -1324,7 +1324,7 @@ void DumpMatchedShaderInputs(const ShaderParams& params,
 }
 
 bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
-                         const std::vector<uint32_t>& spirv) {
+                         const std::vector<uint32_t>& spirv, bool maintenance8_enabled = false) {
 	if (!Config::ShaderValidationEnabled()) {
 		return true;
 	}
@@ -1336,7 +1336,9 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 		                        static_cast<int>(position.column), static_cast<int>(position.index),
 		                        message);
 	});
-	if (tools.Validate(spirv)) {
+	spvtools::ValidatorOptions validator_options;
+	validator_options.SetAllowOffsetTextureOperand(maintenance8_enabled);
+	if (tools.Validate(spirv.data(), spirv.size(), validator_options)) {
 		return true;
 	}
 	spvtools::SpirvTools disassembler(SPV_ENV_VULKAN_1_2);
@@ -1381,10 +1383,11 @@ public:
 	}
 
 	void Submit(const char* label, const char* stage_name, uint64_t shader_hash,
-	            std::vector<uint32_t> spirv) {
+	            std::vector<uint32_t> spirv, bool maintenance8_enabled) {
 		{
 			std::scoped_lock lock(m_mutex);
-			m_jobs.push_back({label, stage_name, shader_hash, std::move(spirv)});
+			m_jobs.push_back({label, stage_name, shader_hash, std::move(spirv),
+			                  maintenance8_enabled});
 		}
 		m_wake.notify_one();
 	}
@@ -1395,6 +1398,7 @@ private:
 		const char*           stage_name = nullptr;
 		uint64_t              shader_hash = 0;
 		std::vector<uint32_t> spirv;
+		bool                  maintenance8_enabled = false; // CompileOptions::maintenance8_enabled
 	};
 
 	void Run(const std::stop_token& stop) {
@@ -1411,7 +1415,8 @@ private:
 			}
 			const auto begin = CompileClockNs();
 			HangWatchdog::Scope validate("program-background-validation", job.shader_hash);
-			const bool valid = ValidateShaderSpirv(job.label, job.shader_hash, job.spirv);
+			const bool valid = ValidateShaderSpirv(job.label, job.shader_hash, job.spirv,
+			                                       job.maintenance8_enabled);
 			const auto ns    = CompileClockNs() - begin;
 			g_compile_totals.validate_async.fetch_add(1, std::memory_order_relaxed);
 			g_compile_totals.validate_async_ns.fetch_add(ns, std::memory_order_relaxed);
@@ -1868,7 +1873,8 @@ struct PipelineCache::ProgramCache {
 			bool       valid          = false;
 			{
 				KYTY_PROFILER_BLOCK("Shader::Validate");
-				valid = ValidateShaderSpirv(options.dump_label, options.shader_hash, emitted.spirv);
+				valid = ValidateShaderSpirv(options.dump_label, options.shader_hash, emitted.spirv,
+				                            options.maintenance8_enabled);
 			}
 			if (Config::ShaderValidationEnabled()) {
 				times.validate_ns = CompileClockNs() - validate_begin;
@@ -1896,7 +1902,7 @@ struct PipelineCache::ProgramCache {
 		}
 		if (validator != nullptr) {
 			validator->Submit(options.dump_label, stage_name, options.shader_hash,
-			                  std::move(emitted.spirv));
+			                  std::move(emitted.spirv), options.maintenance8_enabled);
 		}
 		const auto id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1u;
 		GpuOpProfiler::RegisterShader(id, stage_name, options.shader_hash);
@@ -1904,7 +1910,7 @@ struct PipelineCache::ProgramCache {
 		if (!emitted.spirv_plain.empty()) {
 			if (validator == nullptr) {
 				if (!ValidateShaderSpirv(options.dump_label, options.shader_hash,
-				                         emitted.spirv_plain)) {
+				                         emitted.spirv_plain, options.maintenance8_enabled)) {
 					DumpShaderSpirv(stage_name, options.shader_hash, emitted.spirv_plain);
 					EXIT("%s failed hash=0x%016" PRIx64 ": plain variant SPIR-V validation failed\n",
 					     options.dump_label, options.shader_hash);
@@ -1915,7 +1921,7 @@ struct PipelineCache::ProgramCache {
 			g_shader_modules.Add(plain_module, emitted.spirv_plain);
 			if (validator != nullptr) {
 				validator->Submit(options.dump_label, stage_name, options.shader_hash,
-				                  std::move(emitted.spirv_plain));
+				                  std::move(emitted.spirv_plain), options.maintenance8_enabled);
 			}
 			const auto plain_id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1u;
 			GpuOpProfiler::RegisterShader(plain_id, stage_name, options.shader_hash);
@@ -2804,6 +2810,8 @@ struct PipelineCache::ProgramCache {
 		}
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
+		// VK_KHR_maintenance8 (upstream 460a196fc): SPIR-V validation accepts dynamic texel offsets.
+		options.maintenance8_enabled = maintenance8_enabled;
 		options.shader_hash = params.hash;
 		options.user_data   = runtime.user_data;
 		options.back_code      = params.back_code;
@@ -3303,6 +3311,7 @@ struct PipelineCache::ProgramCache {
 		if (source.input_info.size() != stored) return Outcome::Skipped;
 		std::memcpy(static_cast<void*>(&input_info), source.input_info.data(), stored);
 		input_info.stage = {};
+		ShaderSanitizeStoredInputInfo(input_info);
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			input_info.param_alias_mask = 0;
 		}
@@ -3712,7 +3721,8 @@ struct PipelineCache::ProgramCache {
 		return Result::Ok;
 	}
 
-	explicit ProgramCache(vk::Device device): device(device) {
+	explicit ProgramCache(vk::Device device, bool maintenance8_enabled)
+	    : device(device), maintenance8_enabled(maintenance8_enabled) {
 		if (Config::ShaderValidationEnabled() && SpirvValidator::AsyncEnabled()) {
 			validator = std::make_unique<SpirvValidator>();
 		}
@@ -3753,6 +3763,7 @@ struct PipelineCache::ProgramCache {
 	std::mutex                                                  m_reuse_mutex;
 	size_t history_bytes = 0; // Guarded by m_reuse_mutex.
 	vk::Device                                                  device;
+	bool                                                        maintenance8_enabled = false;
 	// Assigned by compiles running outside m_programs_mutex.
 	std::atomic<uint64_t> next_shader_id {0};
 	std::atomic<uint64_t> speculative_programs {0};
@@ -5382,6 +5393,7 @@ bool NormalizeListSource(const GraphicContext& graphics, ShaderJournal::Source& 
 		if (source.input_info.size() != stored) return false;
 		std::memcpy(static_cast<void*>(&info), source.input_info.data(), stored);
 		info.stage = {};
+		ShaderSanitizeStoredInputInfo(info);
 		return true;
 	};
 	const auto store = [&](const auto& info) {
@@ -5627,7 +5639,7 @@ struct PipelineCache::StatsReporter {
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
-    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)),
+    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device, graphics.maintenance8_enabled)),
       m_diagnostics(std::make_unique<PipelineDiagnostics>()) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	// Each cache counts its generations in its own range, so a per-thread lookup memo left by a
@@ -6434,6 +6446,21 @@ void FinishMeshStage(const GraphicContext& graphics, ShaderVertexInputInfo& vert
 	}
 }
 
+// How the pixel stage's parameters relate to the vertex exports (upstream b38b7454a): rect lists
+// expand flat aliases through separate outputs; otherwise the provoking vertex selects the flat
+// value. Part of the pixel stage's static key.
+static void ApplyPixelParameterMode(const HW::Context& context, const HW::UserConfig& user_config,
+                                    bool mesh_active, bool tess_active,
+                                    ShaderPixelInputInfo& pixel_info) {
+	if (!mesh_active && !tess_active && Prospero::IsRectList(user_config.GetPrimType())) {
+		pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
+	} else if (context.GetModeControl().provoking_vtx_last) {
+		pixel_info.parameter_mode = ShaderPixelParameterMode::LastVertex;
+	} else {
+		pixel_info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
+	}
+}
+
 void ApplyDualSourceBlending(const HW::Context& context, ShaderPixelInputInfo& pixel_info) {
 	const auto& blend    = context.GetBlendControl(0);
 	const bool  blending = blend.enable && !context.GetRenderTarget(0).info.blend_bypass;
@@ -6537,6 +6564,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		ApplyPixelParameterMode(context, user_config, mesh_active, tess_active, pixel_info);
 		ApplyDualSourceBlending(context, pixel_info);
 	}
 	ApplyClipSpace(m_graphics, context, vertex_info[tess_active ? 2u : 0u]);
@@ -6625,6 +6653,8 @@ PipelineCache::SpeculativeResult PipelineCache::PrepareGraphicsProgramsSpeculati
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		ApplyPixelParameterMode(context, user_config, vertex_info.logical_stage == ShaderType::Mesh,
+		                        false, pixel_info);
 		ApplyDualSourceBlending(context, pixel_info);
 	}
 	ApplyClipSpace(m_graphics, context, vertex_info);

@@ -3793,9 +3793,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainWrittenBuffer(uint64_t vaddr, ui
 std::pair<Buffer*, uint64_t> BufferCache::ObtainImageStagingBuffer(uint64_t size) {
 	auto [mapped, offset] = m_staging_buffer.Map(size, 16);
 	if (mapped != nullptr) return {&m_staging_buffer, offset};
-	if (!SmallUploadRingEnabled()) return {nullptr, 0};
-	// The fixed ring must not impose a maximum guest image size. Keep this one-off source
-	// alive until the submission using it has completed, as UploadCopies does for buffers.
+	// The ring (fixed small ring or the default one) must not impose a maximum guest image size
+	// (upstream 9bcf80bf6: a 576 MiB image exceeded the default 512 MiB ring). Keep this one-off
+	// source alive until the submission using it has completed, as UploadCopies does for buffers.
 	auto temporary = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
 	                                         AllFlags, size);
 	auto* source = temporary.get();

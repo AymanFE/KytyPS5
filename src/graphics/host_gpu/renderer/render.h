@@ -969,9 +969,10 @@ public:
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
-	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
+	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+	                    bool async_compute = false);
 	void DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr,
-	                      uint32_t mode);
+	                      uint32_t mode, bool async_compute = false);
 
 	// plan: the committed draw's binding plan for this stage (KYTY_DRAW_PREP_BINDINGS), or null.
 	// keep_images (KYTY_DRAW_RUN continuation): the stage's texture and sampler bindings are the
@@ -1064,6 +1065,8 @@ private:
 	                              bool ignore_target_mask = false, bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
+	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                                   const DrawEmitInfo& emit, DrawRenderState& state);
 	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer,
 	                                          const DrawCallInfo& draw,
 	                                          uint32_t            render_target_slice_offset,
@@ -1097,8 +1100,10 @@ private:
 	// fresh: the writes refer to an upload made for this command (KYTY_SET_REUSE_FRESH).
 	void CommitDescriptorSet(CommandBuffer& buffer, vk::PipelineBindPoint point,
 	                         const PipelineCache::Pipeline& pipeline, bool fresh);
-	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-	                                                     const CommandBuffer&          buffer);
+	// Records the metadata clears a dispatch's buffer writes establish; whether it recorded one
+	// (renderCompute.cpp, KYTY_COMPUTE_META_CLEAR_DISPATCH).
+	bool                      UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
+	                                                  const CommandBuffer&          buffer);
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
 	                                              CommandBuffer& command, uint32_t group_x,
 	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);

@@ -8,6 +8,7 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <array>
+#include <cstring>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -181,10 +182,14 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 	int                thread_ids_num             = 0;
 	int                workgroup_register         = 0;
 	bool               tg_size_en                 = false;
+	// Last before the runtime field: the fields above keep the offsets older shader journals and
+	// pipeline lists stored.
+	bool               async_compute              = false;
 	ShaderStageRuntime stage;
 };
 
 enum class ShaderAlphaBlendSource : uint8_t { None, SourceAlpha, SourceAlphaOne, SourceAlphaZero };
+enum class ShaderPixelParameterMode : uint8_t { FirstVertex, LastVertex, Rectangle };
 
 struct ShaderPixelInputInfo {
 	uint32_t                                       interpolator_settings[32]    = {0};
@@ -221,10 +226,32 @@ struct ShaderPixelInputInfo {
 	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                                           ps_early_z                   = false;
 	bool                                           ps_execute_on_noop           = false;
+	// Last before the runtime field: the fields above keep the offsets older shader journals and
+	// pipeline lists stored.
+	ShaderPixelParameterMode                       parameter_mode = ShaderPixelParameterMode::FirstVertex;
 	ShaderStageRuntime                             stage;
 
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }
 };
+
+// Journals and pipeline lists written before async_compute / parameter_mode existed hold padding
+// bytes where those fields now sit (sizeof did not change). Called after a stored input info is
+// copied in: an out-of-range value becomes the default, so it never reaches the translator; the
+// replay's static-key check then skips entries whose stored key does not match.
+inline void ShaderSanitizeStoredInputInfo(ShaderPixelInputInfo& info) {
+	uint8_t mode = 0;
+	std::memcpy(&mode, &info.parameter_mode, 1);
+	if (mode > static_cast<uint8_t>(ShaderPixelParameterMode::Rectangle)) {
+		info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
+	}
+}
+inline void ShaderSanitizeStoredInputInfo(ShaderComputeInputInfo& info) {
+	uint8_t async = 0;
+	std::memcpy(&async, &info.async_compute, 1);
+	info.async_compute = async == 1;
+}
+template <typename InputInfo>
+inline void ShaderSanitizeStoredInputInfo(InputInfo& /*info*/) {}
 
 union ShaderStageInputInfo {
 	const ShaderVertexInputInfo*  vertex;

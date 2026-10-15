@@ -40,6 +40,11 @@ if (NOT (WIN32 OR LINUX OR APPLE))
     message(FATAL_ERROR "only Windows, Linux, and macOS builds are supported")
 endif()
 
+if(WIN32)
+	# Prevent Windows headers from defining min/max macros in all targets.
+	add_compile_definitions(NOMINMAX)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -331,7 +336,7 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/loader/*.h"
 )
 
-find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
+find_program(KYTY_GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
 set(gpu_tiler_generated_dir "${PROJECT_BINARY_DIR}/gpu_tiler_shaders")
 set(gpu_tiler_shader_names
@@ -434,31 +439,30 @@ list(APPEND kyty_emulator_src "${bda_write_pages_shader_header}")
 list(APPEND kyty_emulator_src ${gpu_tiler_shader_headers})
 
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
-set(gpu_blit_shader_sources
-	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
-	"${gpu_tiler_shader_dir}/gpu_blit_color_to_ms_depth.frag"
-	"${gpu_tiler_shader_dir}/gpu_blit_depth_to_color32.comp"
-	"${gpu_tiler_shader_dir}/gpu_blit_color32_to_depth.frag"
-	"${gpu_tiler_shader_dir}/gpu_video_out_overlay.frag"
-	"${gpu_tiler_shader_dir}/gpu_video_out_downscale.frag"
-)
-foreach(shader_source IN LISTS gpu_blit_shader_sources)
-	get_filename_component(shader_name "${shader_source}" NAME_WE)
+function(add_gpu_blit_shader shader_name shader_file)
+	set(shader_source "${gpu_tiler_shader_dir}/${shader_file}")
 	set(shader_spv "${gpu_blit_generated_dir}/${shader_name}.spv")
 	set(shader_header "${gpu_blit_generated_dir}/${shader_name}_spv.h")
 	string(TOUPPER "${shader_name}_SPV" shader_symbol)
 	add_custom_command(
 		OUTPUT "${shader_header}"
 		COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_blit_generated_dir}"
-		COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+		COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os ${ARGN}
 		        "-I${gpu_tiler_shader_dir}" -o "${shader_spv}" "${shader_source}"
 		COMMAND ${CMAKE_COMMAND} -DINPUT=${shader_spv} -DOUTPUT=${shader_header}
 		        -DSYMBOL=${shader_symbol} -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
 		DEPENDS "${shader_source}"
 		VERBATIM
 	)
-	list(APPEND gpu_blit_shader_headers "${shader_header}")
-endforeach()
+	set(gpu_blit_shader_headers ${gpu_blit_shader_headers} "${shader_header}" PARENT_SCOPE)
+endfunction()
+add_gpu_blit_shader(gpu_blit_fs_triangle gpu_blit_fs_triangle.vert)
+add_gpu_blit_shader(gpu_blit_color_to_ms_depth gpu_blit_color_to_ms_depth.frag)
+add_gpu_blit_shader(gpu_blit_depth_to_color32 gpu_blit_depth_to_color32.comp)
+add_gpu_blit_shader(gpu_blit_color32_to_depth gpu_blit_color32_to_depth.frag)
+add_gpu_blit_shader(gpu_video_out_overlay gpu_video_out_overlay.frag)
+add_gpu_blit_shader(gpu_video_out_downscale gpu_video_out_downscale.frag)
+add_gpu_blit_shader(gpu_imgui_hdr gpu_video_out_overlay.frag -DIMGUI_HDR=1)
 list(APPEND kyty_emulator_src ${gpu_blit_shader_headers})
 
 set(gpu_dcc_generated_dir "${PROJECT_BINARY_DIR}/gpu_dcc_shaders")
@@ -613,11 +617,13 @@ add_kyty_full_emulator_test(null_texture_desc_tests "${KYTY_TESTS_DIR}/NullTextu
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/CodegenOptions.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ReadLaneElimination.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
 )
-target_link_libraries(scalar_provenance_tests common fmt::fmt)
+target_link_libraries(scalar_provenance_tests common fmt::fmt xbyak::xbyak)
 target_include_directories(scalar_provenance_tests PRIVATE ${inc_headers})
 
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
@@ -646,6 +652,14 @@ add_executable(avplayer_file_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(avplayer_file_tests common FFmpeg::ffmpeg ZArchive::zarchive)
 target_include_directories(avplayer_file_tests PRIVATE ${inc_headers})
+
+add_executable(vdecsw_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/VdecswTests.cpp"
+	"${KYTY_SOURCE_DIR}/libs/videoDec2Decoder.cpp"
+	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
+)
+target_link_libraries(vdecsw_tests common FFmpeg::ffmpeg)
+target_include_directories(vdecsw_tests PRIVATE ${inc_headers})
 
 add_executable(bit_array_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/BitArrayTests.cpp"
@@ -821,7 +835,7 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 	# The IR it includes (Program.cpp, Value.cpp) reads KYTY_IR_LINEAR_USES from the codegen options.
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/CodegenOptions.cpp"
 )
-target_link_libraries(resource_materialization_tests common fmt::fmt xxhash)
+target_link_libraries(resource_materialization_tests common fmt::fmt xxhash xbyak::xbyak)
 if(LINUX)
 	# The shared-plan evaluation case runs std::thread workers.
 	target_link_libraries(resource_materialization_tests Threads::Threads)
@@ -842,7 +856,7 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	# BindingLayout asks LoopGuardApplies (KYTY_LOOP_GUARD) whether a program binds GDS.
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/CodegenOptions.cpp"
 )
-target_link_libraries(resource_tracking_tests common fmt::fmt)
+target_link_libraries(resource_tracking_tests common fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
@@ -1167,6 +1181,7 @@ if(BUILD_TESTING)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
+	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME hang_watchdog COMMAND $<TARGET_FILE:hang_watchdog_tests>)
 	add_test(NAME hang_watchdog_fire COMMAND $<TARGET_FILE:hang_watchdog_tests> --fire)
@@ -1369,6 +1384,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-tiler-only)
 	add_test(NAME tile_layout
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tile-layout-only)
+	add_test(NAME image_transfer_layout
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --image-layout-only)
 
 	add_test(NAME texture_cache_layered_image
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --layered-image-only)
@@ -2350,6 +2367,7 @@ if(BUILD_TESTING)
 		archive_file_tests
 		trophy_system_tests
 		avplayer_file_tests
+		vdecsw_tests
 		bit_array_tests
 		lod_stats_report_tests
 		occlusion_pairs_tests

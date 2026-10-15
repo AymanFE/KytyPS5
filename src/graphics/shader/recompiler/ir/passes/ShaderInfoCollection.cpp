@@ -236,15 +236,19 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 			}
 		}
 	}
-	// Aliases of a vertex output share one SPIR-V interface variable. If any
-	// alias reads raw vertices, interpolate the other aliases from those too.
+	// Mixed interpolation modes share raw vertices at their guest export slot.
+	// Rectangle expansion alone supplies separate flat and smooth outputs, and so does
+	// KYTY_PS_PER_VERTEX=0 (no raw-vertex inputs; ShaderPixelParameterLocation).
+	const bool shared_slots = pixel->parameter_mode != ShaderPixelParameterMode::Rectangle &&
+	                          GetCodegenOptions().ps_per_vertex;
 	for (uint32_t input = 0; input < pixel->input_num; input++) {
 		for (uint32_t alias = 0; alias < pixel->input_num; alias++) {
+			const bool same_mode = ShaderPixelParameterIsFlat(*pixel, input) ==
+			                       ShaderPixelParameterIsFlat(*pixel, alias);
 			if (ShaderPixelParameterMappedLocation(*pixel, input) ==
 			        ShaderPixelParameterMappedLocation(*pixel, alias) &&
-			    ShaderPixelParameterIsFlat(*pixel, input) ==
-			        ShaderPixelParameterIsFlat(*pixel, alias)) {
-				per_vertex[input] = per_vertex[input] || per_vertex[alias];
+			    (shared_slots || same_mode)) {
+				per_vertex[input] = per_vertex[input] || per_vertex[alias] || !same_mode;
 			}
 		}
 	}
@@ -255,7 +259,8 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 		         per_vertex[input]);
 	}
 	for (uint32_t input = 0; input < pixel->input_num; input++) {
-		if (interpolated[input] && per_vertex[input]) {
+		if (interpolated[input] && per_vertex[input] &&
+		    !ShaderPixelParameterIsFlat(*pixel, input)) {
 			const auto kind = pixel->ps_no_perspective ? StageInputKind::BaryCoordNoPerspective
 			                                           : StageInputKind::BaryCoordSmooth;
 			AddInput(info, kind, 0, 3,

@@ -66,10 +66,13 @@ struct ConfigOptions {
 	PresentMode            present_mode                = PresentMode::Mailbox;
 	int32_t                gpu_index                   = -1;
 	bool                   fullscreen_enabled          = false;
+	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
+	bool                   splash_enabled              = true;
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
+	bool                   network_connected           = false;
 	uint32_t               vblank_frequency            = 60;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
@@ -96,6 +99,8 @@ struct ConfigOptions {
 	bool red_zone_protection_enabled = false;
 #endif
 	Keymap keymap;
+	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
+	std::vector<std::string> guest_arguments {""};
 };
 
 void Load(const ConfigOptions& cfg);
@@ -117,10 +122,12 @@ bool     AudioObjectsEnabled();
 PresentMode GetPresentMode();
 int32_t GetGpuIndex();
 bool     FullscreenEnabled();
+bool     HdrEnabled();
 bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
 const std::string& GetAmdCpuDecision();
+bool     IsNetworkConnected();
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();
@@ -156,6 +163,7 @@ bool RedZoneProtectionEnabled();
 #endif
 
 const Keymap& GetKeymap();
+const std::vector<std::string>& GetGuestArguments();
 
 } // namespace Config
 

@@ -593,6 +593,24 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			return;
 		case ValueOpcode::SelectU32:
 		case ValueOpcode::SelectF32: FoldSelect(inst); return;
+		case ValueOpcode::FPCmpClass32: {
+			const auto mask = Arg(inst, 1);
+			if (!IsImmediate(mask, Type::U32)) {
+				return;
+			}
+			switch (mask.U32() & 0x3ffu) {
+				case 0u: Replace(inst, Value(false)); break;
+				case 0x3ffu: Replace(inst, Value(true)); break;
+				case 3u: {
+					const auto result = block.PrependNewInst(
+					    instruction, ValueOpcode::FPIsNan32, {Arg(inst, 0)});
+					Replace(inst, Value(&*result));
+					break;
+				}
+				default: break;
+			}
+			return;
+		}
 		case ValueOpcode::BitFieldInsert: {
 			const auto base   = Arg(inst, 0);
 			const auto insert = Arg(inst, 1);
@@ -1069,14 +1087,14 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 	}
 }
 
-// In wave32, extracting this invocation's bit from a ballot recovers its predicate.
-// Keep that identity through scalar EXEC operations and their loop-carried mask Phis.
+// Full and empty masks have a constant predicate in either wave size. In wave32,
+// ballot projection also survives scalar EXEC operations and loop-carried mask Phis.
 class LaneMaskProjection {
 public:
 	explicit LaneMaskProjection(std::unordered_set<Inst*>& lowered_ancillary)
 	    : m_lowered_ancillary(lowered_ancillary) {}
 
-	void Fold(Inst& inst) {
+	void Fold(Inst& inst, uint32_t wave_size) {
 		if (inst.GetOpcode() != ValueOpcode::INotEqual32 || !Immediate(Arg(inst, 1), 0u)) return;
 		const auto* bit = Arg(inst, 0).TryInstruction();
 		if (bit == nullptr || bit->GetOpcode() != ValueOpcode::BitwiseAnd32 ||
@@ -1088,9 +1106,15 @@ public:
 		    !Immediate(Arg(*index, 1), 31u)) return;
 		const auto* lane = Arg(*index, 0).TryInstruction();
 		if (lane == nullptr || lane->GetOpcode() != ValueOpcode::LaneId) return;
+		const auto mask = Arg(*shift, 0);
+		if (Immediate(mask, 0u) || Immediate(mask, UINT32_MAX)) {
+			Replace(inst, Value(mask.U32() != 0u));
+			return;
+		}
+		if (wave_size != 32u) return;
 		m_visited.clear();
 		m_grounded = false;
-		if (CanProject(Arg(*shift, 0)) && m_grounded) Replace(inst, Project(Arg(*shift, 0)));
+		if (CanProject(mask) && m_grounded) Replace(inst, Project(mask));
 	}
 
 private:
@@ -1472,7 +1496,7 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 	LaneMaskProjection mask_projection(lowered_ancillary);
 	for (auto* block: blocks) {
 		for (auto inst = block->begin(); inst != block->end(); ++inst) {
-			if (wave_size == 32u) mask_projection.Fold(*inst);
+			mask_projection.Fold(*inst, wave_size);
 			FoldInstruction(*block, inst, lowered_ancillary, sets);
 		}
 	}

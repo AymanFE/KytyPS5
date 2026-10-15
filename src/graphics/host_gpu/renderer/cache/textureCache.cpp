@@ -49,6 +49,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vulkan/vulkan_format_traits.hpp>
 #include <xxhash.h>
 
@@ -1097,16 +1098,19 @@ void TextureCache::DeleteImage(ImageId id) {
 		HangTrace::SetImageFreeReason(HangTrace::ImageFreeReason::Other);
 	}
 	// Stencil associations only ever point at depth images (AssociateStencil requires one, and
-	// an image's pixel format never changes), so retiring a color image skips the full scan.
-	if (!image->depth_id && image->info.IsDepth()) {
-		std::vector<ImageId> associations;
-		m_slot_images.ForEach([&](ImageId candidate, const Image& associated) {
-			if (associated.depth_id == id) {
-				associations.push_back(candidate);
+	// an image's pixel format never changes). The depth image lists them (Image::stencil_ids,
+	// upstream f4692a450), so retiring one needs no full-cache scan.
+	if (image->depth_id) {
+		if (auto* owner = m_slot_images.try_get(image->depth_id); owner != nullptr) {
+			std::erase(owner->stencil_ids, id);
+		}
+	} else if (image->info.IsDepth()) {
+		// Detached first: deleting each association also unlinks it from its depth owner.
+		for (const auto association: std::exchange(image->stencil_ids, {})) {
+			const auto* associated = m_slot_images.try_get(association);
+			if (associated != nullptr && associated->depth_id == id) {
+				FreeImage(association, HangTrace::ImageFreeReason::DepthAssociation);
 			}
-		});
-		for (const auto association: associations) {
-			FreeImage(association, HangTrace::ImageFreeReason::DepthAssociation);
 		}
 	}
 	if (image->IsGpuModified()) {
@@ -2086,6 +2090,11 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
                                 uint32_t layer) {
 	RefreshCopySource(source_id);
 	RequireFullResidency(destination_id);
+	// A partial copy into an image whose guest buffer was written by the GPU: take those bytes
+	// first, or the rest of the image would publish stale contents (upstream dad900c61).
+	if (m_slot_images[destination_id].IsBufferModified()) {
+		RefreshImage(destination_id);
+	}
 	auto& destination = m_slot_images[destination_id];
 	auto& source      = m_slot_images[source_id];
 	TrackImage(destination_id);
@@ -4011,6 +4020,13 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	if (record.depth_id != depth_id) {
 		// A binding of this image now resolves to the depth image (TextureBindingMemo).
 		NoteStructureChange(record);
+		// Reparented: the previous depth owner no longer retires it (Image::stencil_ids).
+		if (record.depth_id) {
+			if (auto* previous = m_slot_images.try_get(record.depth_id); previous != nullptr) {
+				std::erase(previous->stencil_ids, association);
+			}
+		}
+		depth.stencil_ids.push_back(association);
 	}
 	record.depth_id             = depth_id;
 	record.stencil_subresources = depth.stencil_subresources;
@@ -6938,6 +6954,10 @@ void TextureCache::ReportVram() {
 }
 
 void TextureCache::ProcessDownloadImages() {
+	// Only KYTY/config readback of linear images enrolls downloads (upstream 5b730d4df).
+	if (!m_readback_linear_images) {
+		return;
+	}
 	std::scoped_lock lock {m_lock};
 	for (const auto id: m_download_images) {
 		const auto owner = m_slot_images.try_get(id);

@@ -91,6 +91,10 @@ struct GraphicContext {
 	bool                               storage_image_read_without_format_enabled = false;
 	// Vulkan 1.2 samplerFilterMinmax: S# FILTER_MODE min/max (SamplerCache).
 	bool                               sampler_filter_minmax_enabled         = false;
+	// Vulkan 1.2 shaderStorageBufferArrayNonUniformIndexing, enabled when supported (upstream
+	// made it a hard requirement in fd66f580b; shaders that index storage-buffer arrays
+	// non-uniformly need it).
+	bool                               storage_buffer_array_non_uniform_indexing_enabled = false;
 	// VK_KHR_maintenance8: vkCmdCopyImage between a depth aspect and a compatible color format
 	// (D32 <-> R32, D16 <-> R16). KYTY_DIRECT_IMAGE_COPY_M8=0 leaves the extension disabled.
 	bool                               maintenance8_enabled                  = false;

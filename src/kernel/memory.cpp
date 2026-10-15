@@ -89,6 +89,9 @@ constexpr uint64_t DEFAULT_FLEXIBLE_MEMORY_SIZE = 1ull * 1024ull * 1024ull * 102
 static uint64_t                      g_flexible_memory_size        = DEFAULT_FLEXIBLE_MEMORY_SIZE;
 static bool                          g_flexible_memory_size_frozen = false;
 static Graphics::RenderContext*       g_gpu_resources               = nullptr;
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+static void (*g_test_gpu_range)(bool, uint64_t, size_t) = nullptr;
+#endif
 
 static Graphics::RenderContext& GetGpuResources() {
 	EXIT_IF(g_gpu_resources == nullptr);
@@ -132,6 +135,9 @@ static void ResyncGpuRangeProtection(uint64_t vaddr, uint64_t size) {
 }
 
 static void MapGpuRange(uint64_t vaddr, uint64_t size) {
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+	if (g_test_gpu_range != nullptr) g_test_gpu_range(true, vaddr, size);
+#endif
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return;
 	}
@@ -139,6 +145,9 @@ static void MapGpuRange(uint64_t vaddr, uint64_t size) {
 }
 
 static void UnmapGpuRange(uint64_t vaddr, uint64_t size) {
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+	if (g_test_gpu_range != nullptr) g_test_gpu_range(false, vaddr, size);
+#endif
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return;
 	}
@@ -1688,6 +1697,15 @@ bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
 }
 
+// Upstream 40692dfb6: TryReadSparseBacking plus the private mappings in the backing gaps, read
+// in place (reservations and unmapped gaps read as zeros).
+bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+	if (g_guest_address_space == nullptr) {
+		return false;
+	}
+	return g_guest_address_space->CopySparseMemory<true>(vaddr, data, size);
+}
+
 static bool SelfTestSub64SharedPlaceholderAlias() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	constexpr uint64_t PageSize    = 0x4000;
@@ -3188,20 +3206,7 @@ static bool FreeGuestMemoryOwner(uint64_t vaddr, uint64_t size) {
 	return true;
 }
 
-static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
-	if (len == 0 || UINT64_MAX - vaddr < len) {
-		return KERNEL_ERROR_EINVAL;
-	}
-
-	VirtualRanges::Range range {};
-	if (!g_virtual_ranges->Query(vaddr, 0, &range)) {
-		return KERNEL_ERROR_EACCES;
-	}
-	const auto chunk_len = std::min<uint64_t>(len, range.size - (vaddr - range.start));
-	if (chunk_len < len) {
-		const int ret = UnmapMemoryRange(vaddr, chunk_len);
-		return ret == OK ? UnmapMemoryRange(vaddr + chunk_len, len - chunk_len) : ret;
-	}
+static int UnmapMemoryOwner(const VirtualRanges::Range& range, uint64_t vaddr, size_t len) {
 	if (IsReservedRangeType(range.type)) {
 		if (!g_guest_address_space->ReleaseFree(vaddr, len)) {
 			return KERNEL_ERROR_EACCES;
@@ -3266,6 +3271,13 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 	return OK;
 }
 
+static int UnmapMemoryRange(const VirtualRanges::Range& range, uint64_t vaddr, size_t len) {
+	UnmapGpuRange(vaddr, len);
+	const int result = UnmapMemoryOwner(range, vaddr, len);
+	if (result != OK && IsCommittedRangeType(range.type)) MapGpuRange(vaddr, len);
+	return result;
+}
+
 // The ABI entry point and batch operations hold g_memory_operation_mutex.
 static int UnmapMemory(uint64_t vaddr, size_t len) {
 	LOGF("\t start = 0x%016" PRIx64 "\n"
@@ -3279,14 +3291,43 @@ static int UnmapMemory(uint64_t vaddr, size_t len) {
 	if (!g_virtual_ranges->QuerySpan(vaddr, len, &ranges)) {
 		return KERNEL_ERROR_EACCES;
 	}
-	UnmapGpuRange(vaddr, len);
-	return UnmapMemoryRange(vaddr, len);
+	for (const auto& range: ranges) {
+		const int result = UnmapMemoryRange(range, range.start, range.size);
+		if (result != OK) return result;
+	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
 	return UnmapMemory(vaddr, len);
+}
+
+// Upstream checks its extended-memory AMM window here; this line's AMM window is libAmpr's
+// (AMM_VA_START, validated by the AMPR command builders), so only shape is checked.
+static bool IsAmmMemoryRange(uint64_t vaddr, size_t size) {
+	constexpr uint64_t page_size = 0x4000;
+	return size != 0 && ((vaddr | size) & (page_size - 1)) == 0 && vaddr != 0 &&
+	       UINT64_MAX - vaddr >= size;
+}
+
+int UnmapAmmMemory(uint64_t vaddr, size_t size) {
+	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
+	if (!IsAmmMemoryRange(vaddr, size)) return KERNEL_ERROR_EINVAL;
+
+	const auto end = vaddr + size;
+	while (vaddr < end) {
+		VirtualRanges::Range range {};
+		// AMM unmap accepts holes, including a completely unmapped range.
+		if (!g_virtual_ranges->Query(vaddr, 1, &range) || range.start >= end) break;
+		vaddr = std::max(vaddr, range.start);
+		const auto chunk = std::min(end, range.start + range.size) - vaddr;
+		const int result = UnmapMemoryRange(range, vaddr, chunk);
+		if (result != OK) return result;
+		vaddr += chunk;
+	}
+	return OK;
 }
 
 size_t KYTY_SYSV_ABI KernelGetDirectMemorySize() {
@@ -4215,6 +4256,10 @@ TestClampTotals TestClampRangeMemoTotals() {
 	const auto& totals = t_clamp_totals;
 	return {totals.hits, totals.misses, totals.verify_checks, totals.verify_mismatches,
 	        totals.verify_races};
+}
+
+void TestSetGpuRangeCallback(void (*callback)(bool, uint64_t, size_t)) {
+	g_test_gpu_range = callback;
 }
 
 void TestBeforeNextBackingMap(callback_func_t callback) {

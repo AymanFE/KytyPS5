@@ -1,6 +1,7 @@
 #include "graphics/shader/shader.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <cstdlib>
@@ -41,6 +42,13 @@ uint32_t ShaderPixelParameterMappedLocation(const ShaderPixelInputInfo& info, ui
 
 uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
                                       std::span<const uint32_t> active_inputs, uint32_t input) {
+	// Outside rectangle lists, flat and smooth aliases of one vertex export read raw vertices at
+	// its location (ShaderInfoCollection). KYTY_PS_PER_VERTEX=0 has no raw-vertex inputs, so
+	// differing aliases keep separate locations there as rectangles do.
+	if (info.parameter_mode != ShaderPixelParameterMode::Rectangle &&
+	    ShaderRecompiler::GetCodegenOptions().ps_per_vertex) {
+		return ShaderPixelParameterMappedLocation(info, input);
+	}
 	std::array<bool, 32> used_locations {};
 	for (const auto active_input: active_inputs) {
 		used_locations[ShaderPixelParameterMappedLocation(info, active_input)] = true;
@@ -53,8 +61,7 @@ uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
 		auto&      location = group_locations[group];
 		if (location == UINT32_MAX) {
 			location = mapped;
-			// Smooth and custom interpolation read the same vertex output. Only
-			// differing flat/smooth rectangle outputs need separate locations.
+			// Rectangle expansion broadcasts flat aliases through separate outputs.
 			if (group_locations[group ^ 1u] != UINT32_MAX) {
 				location = 0;
 				while (location < used_locations.size() && used_locations[location]) {

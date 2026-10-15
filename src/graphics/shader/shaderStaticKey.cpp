@@ -98,7 +98,9 @@ void BuildStageStaticKey(const ShaderPixelInputInfo& info, std::vector<uint32_t>
 	key.push_back(static_cast<uint32_t>(info.ps_pos_w));
 	key.push_back(static_cast<uint32_t>(info.ps_front_face));
 	key.push_back(static_cast<uint32_t>(info.ps_ancillary));
-	key.push_back(static_cast<uint32_t>(info.ps_no_perspective));
+	// Bits 8+: the provoking-vertex mode of flat parameters (0, first vertex, keeps older keys).
+	key.push_back(static_cast<uint32_t>(info.ps_no_perspective) |
+	              (static_cast<uint32_t>(info.parameter_mode) << 8u));
 	key.push_back(static_cast<uint32_t>(info.ps_pixel_kill_enable));
 	key.push_back(static_cast<uint32_t>(info.ps_depth_export_enable));
 	key.push_back(static_cast<uint32_t>(info.ps_sample_mask_export_enable));
@@ -132,7 +134,9 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 	// Bit 31: LDS in the device buffer (KYTY_LDS_DEVICE_BUFFER); sizes stay below 2^16 dwords.
 	key.push_back(info.lds_size_dwords | (info.lds_storage ? 0x80000000u : 0u));
 	key.push_back(info.scratch_size_dwords);
-	key.push_back(static_cast<uint32_t>(info.dispatch_thread_dimensions));
+	// Bit 1: an async compute queue (S_GETREG_B32 HW_ID2 answers only for graphics compute).
+	key.push_back(static_cast<uint32_t>(info.dispatch_thread_dimensions) |
+	              (static_cast<uint32_t>(info.async_compute) << 1u));
 	for (int i = 0; i < 3; i++) {
 		key.push_back(info.threads_num[i]);
 		key.push_back(static_cast<uint32_t>(info.group_id[i]));

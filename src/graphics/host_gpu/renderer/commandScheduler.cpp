@@ -620,6 +620,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	m_dynamic_state.Invalidate();
 	if (m_recorder != nullptr) {
 		// The recorder begins the native buffer and stamps KYTY_GPU_TIMING / GpuOpProfiler there,
 		// with this recording's tick and start time.

@@ -194,6 +194,8 @@ SharedAccess SharedAccessOf(ValueOpcode opcode) {
 		case ValueOpcode::SharedAtomicUMin32:
 		case ValueOpcode::SharedAtomicSMax32:
 		case ValueOpcode::SharedAtomicUMax32:
+		case ValueOpcode::SharedAtomicUMax64:
+		case ValueOpcode::SharedAtomicCmpSwap64:
 		case ValueOpcode::SharedAtomicAnd32:
 		case ValueOpcode::SharedAtomicOr32:
 		case ValueOpcode::SharedAtomicOr64:
@@ -209,6 +211,8 @@ uint32_t SharedComponentCount(ValueOpcode opcode) {
 	switch (opcode) {
 		case ValueOpcode::SharedAtomicIAdd64:
 		case ValueOpcode::SharedAtomicOr64:
+		case ValueOpcode::SharedAtomicUMax64:
+		case ValueOpcode::SharedAtomicCmpSwap64:
 		case ValueOpcode::LoadSharedU32x2:
 		case ValueOpcode::WriteSharedU32x2: return 2u;
 		case ValueOpcode::LoadSharedU32x3:

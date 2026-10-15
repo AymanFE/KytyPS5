@@ -290,14 +290,10 @@ uint32_t ByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Memo
 }
 
 uint32_t DwordIndex(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
-	auto address = ByteAddress(ctx, inst, mem);
-	if (mem.kind == IR::ResourceKind::Lds || mem.kind == IR::ResourceKind::Gds) {
-		// RDNA2 DS region addresses retain bits [15:2] after adding the byte offset.
-		address = Binary(ctx.state, spv::OpBitwiseAnd, TypeU32(ctx.state), address,
-		                 ConstantU32(ctx.state, 0xffffu));
-	}
+	// DS reads and writes keep the full region address (out-of-range words fail the bounds check);
+	// only DS atomics truncate it (EmitAtomicAccess).
 	return Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state),
-	              address, ConstantU32(ctx.state, 2));
+	              ByteAddress(ctx, inst, mem), ConstantU32(ctx.state, 2));
 }
 
 uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
@@ -587,6 +583,7 @@ void StoreWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) 
 
 spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 	switch (opcode) {
+		case IR::ValueOpcode::SharedAtomicCmpSwap64:
 		case IR::ValueOpcode::BufferAtomicCmpSwap32: return spv::OpAtomicCompareExchange;
 		case IR::ValueOpcode::BufferAtomicSwap32:
 		case IR::ValueOpcode::BufferAtomicSwap64:
@@ -609,7 +606,8 @@ spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 		case IR::ValueOpcode::SharedAtomicSMax32: return spv::OpAtomicSMax;
 		case IR::ValueOpcode::BufferAtomicUMax32:
 		case IR::ValueOpcode::BufferAtomicUMax64:
-		case IR::ValueOpcode::SharedAtomicUMax32: return spv::OpAtomicUMax;
+		case IR::ValueOpcode::SharedAtomicUMax32:
+		case IR::ValueOpcode::SharedAtomicUMax64: return spv::OpAtomicUMax;
 		case IR::ValueOpcode::BufferAtomicAnd32:
 		case IR::ValueOpcode::BufferAtomicAnd64:
 		case IR::ValueOpcode::SharedAtomicAnd32: return spv::OpAtomicAnd;
@@ -655,7 +653,12 @@ uint32_t EmitAtomicAccess(ValueEmitContext& ctx, const IR::Inst& inst,
 		return EmitIndirectAtomic(ctx, inst, false, std::forward<Fn>(operation));
 	}
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto index = DwordIndex(ctx, inst, mem);
+		auto index = DwordIndex(ctx, inst, mem);
+		if (mem.kind == IR::ResourceKind::Lds || mem.kind == IR::ResourceKind::Gds) {
+			// Keep region-address truncation local to DS atomics.
+			index = Binary(ctx.state, spv::OpBitwiseAnd, TypeU32(ctx.state), index,
+			               ConstantU32(ctx.state, 0x3fffu));
+		}
 		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
 		return EmitValueOrZeroIfCondition(
 		    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
@@ -1562,37 +1565,55 @@ void EmitSharedAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	const auto& mem = ctx.Memory(inst);
 	EnsureLdsStorage(state);
-	EmitIfCondition(state, ctx.Arg(inst, 2), [&]() {
-		const auto address = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
-		                            ByteAddress(ctx, inst, mem), ConstantU32(state, 0xfff8u));
-		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
-		                          ConstantU32(state, 3u));
-		// Device-buffer LDS: the region's bound in qwords (regions are whole qwords: LDS sizes are
-		// multiples of 512 bytes).
-		const auto bound = state.lds_storage_class == spv::StorageClassStorageBuffer
-		                       ? EmitBinaryU32(state, spv::OpShiftRightLogical, state.lds_length,
-		                                       ConstantU32(state, 1))
-		                       : ConstantU32(state, LdsDwordCount(state) / 2u);
-		const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index, bound);
-		EmitIfCondition(state, in_bounds, [&]() {
-			auto native_index = index;
-			auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
-			if (state.lds_storage_class == spv::StorageClassStorageBuffer) {
-				native_index = EmitAddU32(state, index, EmitBinaryU32(
-				    state, spv::OpShiftRightLogical, state.lds_base_dwords, ConstantU32(state, 1)));
-				semantics = spv::MemorySemanticsUniformMemoryMask;
-			}
-			const auto pointer = state.builder.AllocateId();
+	const auto address = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+	                            ByteAddress(ctx, inst, mem), ConstantU32(state, 0xfff8u));
+	const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
+	                          ConstantU32(state, 3u));
+	// Device-buffer LDS: the region's bound in qwords (regions are whole qwords: LDS sizes are
+	// multiples of 512 bytes).
+	const auto bound = state.lds_storage_class == spv::StorageClassStorageBuffer
+	                       ? EmitBinaryU32(state, spv::OpShiftRightLogical, state.lds_length,
+	                                       ConstantU32(state, 1))
+	                       : ConstantU32(state, LdsDwordCount(state) / 2u);
+	const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index, bound);
+	const auto active = EmitLogicalAndBool(state, ctx.Arg(inst, inst.NumArgs() - 1), in_bounds);
+	const auto emit = [&]() {
+		auto native_index = index;
+		auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
+		if (state.lds_storage_class == spv::StorageClassStorageBuffer) {
+			native_index = EmitAddU32(state, index, EmitBinaryU32(
+			    state, spv::OpShiftRightLogical, state.lds_base_dwords, ConstantU32(state, 1)));
+			semantics = spv::MemorySemanticsUniformMemoryMask;
+		}
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    spv::OpAccessChain, TypePointer(state, state.lds_storage_class, TypeU64(state)),
+		    pointer, state.lds_u64_variable, ConstantU32(state, 0), native_index);
+		const auto old = state.builder.AllocateId();
+		const auto opcode = SpirvAtomicOpcode(inst.GetOpcode());
+		const auto scope = ConstantU32(state, spv::ScopeWorkgroup);
+		const auto acquire_release =
+		    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | semantics);
+		if (opcode == spv::OpAtomicCompareExchange) {
+			// RDNA2 DS compares DATA and stores DATA2, opposite to BUFFER atomics.
 			state.builder.AddFunction(
-			    spv::OpAccessChain, TypePointer(state, state.lds_storage_class, TypeU64(state)),
-			    pointer, state.lds_u64_variable, ConstantU32(state, 0), native_index);
-			const auto value = ctx.Arg(inst, 1);
-			state.builder.AddFunction(
-			    SpirvAtomicOpcode(inst.GetOpcode()), TypeU64(state), state.builder.AllocateId(),
-			    pointer, ConstantU32(state, spv::ScopeWorkgroup),
-			    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | semantics), value);
-		});
-	});
+			    opcode, TypeU64(state), old, pointer, scope, acquire_release,
+			    ConstantU32(state, spv::MemorySemanticsAcquireMask | semantics),
+			    ctx.Arg(inst, 2), ctx.Arg(inst, 1));
+		} else {
+			state.builder.AddFunction(opcode, TypeU64(state), old, pointer, scope,
+			                          acquire_release, ctx.Arg(inst, 1));
+		}
+		return old;
+	};
+	// DS_MAX_RTN_U64 and DS_CMPST_RTN_B64 return the old value (0 for an inactive or
+	// out-of-range lane); the no-return forms are Void.
+	if (inst.GetType() != IR::Type::Void && inst.HasUses()) {
+		ctx.Define(inst, EmitValueOrDefaultIfCondition(state, active, TypeU64(state),
+		                                               ConstantU64(state, 0), emit));
+	} else {
+		EmitIfCondition(state, active, [&]() { emit(); });
+	}
 }
 
 uint32_t EmitBufferFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst) {

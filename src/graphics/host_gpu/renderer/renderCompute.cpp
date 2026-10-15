@@ -58,8 +58,21 @@ static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::Descriptor
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-                                                const CommandBuffer&          buffer) {
+// KYTY_COMPUTE_META_CLEAR_DISPATCH=1 (default off; upstream 01ce97388's behaviour): a dispatch
+// whose buffer writes recorded a metadata clear (UpdateComputeMetaClears) still runs, so its guest
+// writes to the metadata memory are kept for readers that reuse it as an ordinary buffer. Off, the
+// recorded clear consumes the dispatch, as before.
+static bool ComputeMetaClearDispatchEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_COMPUTE_META_CLEAR_DISPATCH");
+		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+// Whether a metadata clear was recorded.
+bool RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
+                                            const CommandBuffer&          buffer) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	if (resources.buffers.size() != program.info.buffers.size()) {
@@ -69,26 +82,24 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		const auto& resource   = program.info.buffers[i];
 		const auto  descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-		// A metadata resource that is also read is not proven to be a full overwrite. Execute it
-		// conservatively instead of replacing the dispatch with a coarse full-surface clear.
+		// Reads and transforms of metadata do not establish a clear state.
 		if ((!resource.written || resource.read) && cache.IsMeta(descriptor.Base48())) {
 			return false;
 		}
 	}
 
+	bool cleared = false;
 	if (!program.info.has_bitwise_xor) {
 		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 			const auto& resource = program.info.buffers[i];
 			if (resource.written) {
 				const auto descriptor =
 				    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-				if (cache.ClearMeta(descriptor.Base48())) {
-					return true;
-				}
+				cleared |= cache.ClearMeta(descriptor.Base48());
 			}
 		}
 	}
-	return false;
+	return cleared;
 }
 
 bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
@@ -288,7 +299,7 @@ bool RenderExecutor::BindComputeLds(const ShaderComputeInputInfo& input, Prepare
 
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
-                                    uint32_t thread_group_z, uint32_t mode) {
+                                    uint32_t thread_group_z, uint32_t mode, bool async_compute) {
 	KYTY_GPU_OP_SITE("dispatch");
 	// KYTY_CP_GAP_STATS: this scope's phases (drawPrep/cpGaps.h).
 	const CpGaps::Scope gap(CpGaps::Cat::DispatchOp);
@@ -351,12 +362,15 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const bool use_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
 	DrawPrep::MakeComputeInputInfo(cs_regs, {thread_group_x, thread_group_y, thread_group_z, mode},
 	                               input_info);
+	// After MakeComputeInputInfo (it resets the info). Part of the program key (GETREG HW_ID2).
+	input_info.async_compute = async_compute;
 	CpGaps::Phase(CpGaps::Cat::DispatchProgram);
 	ShaderProgram compute_program;
 	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): the program a worker prepared from this dispatch's
-	// register snapshot, when its certificate holds; otherwise the serial lookup.
+	// register snapshot, when its certificate holds; otherwise the serial lookup. Workers prepare
+	// graphics-queue dispatches only (MakeComputeInputInfo leaves async_compute false).
 	auto* const prepared = std::exchange(m_prepared_dispatch, nullptr);
-	if (prepared != nullptr && DrawPrep::ValidateDispatch(*prepared, input_info)) {
+	if (prepared != nullptr && !async_compute && DrawPrep::ValidateDispatch(*prepared, input_info)) {
 		if (DrawPrep::VerifyMode() != 0) {
 			// The serial lookup on copies; it only reads memory the certificate proved clean.
 			auto serial_prep = std::make_unique<PipelineCache::StagePrep>();
@@ -386,7 +400,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
-	if (TryConsumeComputeMetaClear(input_info, buffer)) {
+	// A recorded metadata clear consumes the dispatch unless KYTY_COMPUTE_META_CLEAR_DISPATCH keeps
+	// its guest writes (upstream 01ce97388).
+	if (UpdateComputeMetaClears(input_info, buffer) && !ComputeMetaClearDispatchEnabled()) {
 		ResetBindings();
 		return;
 	}
@@ -606,7 +622,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
-                                      uint64_t args_addr, uint32_t mode) {
+                                      uint64_t args_addr, uint32_t mode, bool async_compute) {
 	KYTY_GPU_OP_SITE("dispatch.indirect");
 	const CpGaps::Scope gap(CpGaps::Cat::DispatchOp);
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
@@ -623,11 +639,12 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 	ShaderComputeInputInfo input_info {};
+	input_info.async_compute = async_compute;
 	CpGaps::Phase(CpGaps::Cat::DispatchProgram);
 	ShaderProgram compute_program;
 	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): as in DispatchDirect, from no workgroup counts.
 	auto* const prepared = std::exchange(m_prepared_dispatch, nullptr);
-	if (prepared != nullptr && DrawPrep::ValidateDispatch(*prepared, input_info)) {
+	if (prepared != nullptr && !async_compute && DrawPrep::ValidateDispatch(*prepared, input_info)) {
 		if (DrawPrep::VerifyMode() != 0) {
 			auto serial_prep = std::make_unique<PipelineCache::StagePrep>();
 			auto serial_info = input_info;
