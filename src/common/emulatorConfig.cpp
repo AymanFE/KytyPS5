@@ -30,6 +30,8 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.audio_objects_volume > MAX_AUDIO_VOLUME);
 
 	*g_config = cfg;
+	Detail::g_graphics_debug_dump_enabled = cfg.graphics_debug_dump_enabled;
+	Detail::g_sync_raw_image_buffers      = cfg.sync_raw_image_buffers;
 }
 
 uint32_t GetScreenWidth() {
@@ -160,10 +162,6 @@ std::filesystem::path GetCommandBufferDumpFolder() {
 	return g_config->command_buffer_dump_folder;
 }
 
-bool GraphicsDebugDumpEnabled() {
-	return g_config->graphics_debug_dump_enabled;
-}
-
 LogDirection GetPrintfDirection() {
 	return g_config->printf_direction;
 }
@@ -190,10 +188,6 @@ bool RenderDocEnabled() {
 
 bool ReadbackLinearImagesEnabled() {
 	return g_config->readback_linear_images;
-}
-
-bool SyncRawImageBuffersEnabled() {
-	return g_config->sync_raw_image_buffers;
 }
 
 bool TessellationEnabled() {

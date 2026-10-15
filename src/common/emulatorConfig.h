@@ -140,7 +140,16 @@ std::filesystem::path  GetShaderLogFolder();
 bool                  CommandBufferDumpEnabled();
 std::filesystem::path GetCommandBufferDumpFolder();
 
-bool GraphicsDebugDumpEnabled();
+// Read per draw on the command processor (debug.cpp LogDrawPhase, descriptors.cpp): copies of the
+// loaded options, so the check inlines (the common library is not part of the emulator's LTO).
+namespace Detail {
+inline bool g_graphics_debug_dump_enabled = false;
+inline bool g_sync_raw_image_buffers      = false;
+} // namespace Detail
+
+inline bool GraphicsDebugDumpEnabled() {
+	return Detail::g_graphics_debug_dump_enabled;
+}
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
@@ -153,7 +162,9 @@ bool GpuAssistedValidationEnabled();
 
 bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();
-bool SyncRawImageBuffersEnabled();
+inline bool SyncRawImageBuffersEnabled() {
+	return Detail::g_sync_raw_image_buffers;
+}
 bool TessellationEnabled();
 bool TrophyEnabled();
 bool PlayGoHackEnabled();
