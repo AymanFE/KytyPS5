@@ -258,10 +258,6 @@ void               SetCpContext(uint32_t queue, uint64_t sequence);
 // Whether [address, address + size) overlaps the CP watch window (never without the CP trace:
 // the window is only set with it). Inlined: checked on every texture-cache image use.
 [[nodiscard]] inline bool CpWatch(uint64_t address, uint64_t size) {
-	// Without a window both bounds are 0: one load and a branch decide (no read of the range).
-	if (Detail::g_cp_watch_end == 0) [[likely]] {
-		return false;
-	}
 	return Detail::g_cp_watch_end > Detail::g_cp_watch_begin && address < Detail::g_cp_watch_end &&
 	       Detail::g_cp_watch_begin < address + size;
 }
