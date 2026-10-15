@@ -1235,6 +1235,7 @@ void Initialize() {
 	                           "t_ms,queue,starts,wait_avg_us,wait_max_us,busy_us,slices,incomplete");
 
 	g_publisher = std::jthread([](std::stop_token stop) {
+		Common::PlaceCurrentThreadCold();
 		std::unique_lock lock(g_publish_mutex);
 		while (!stop.stop_requested()) {
 			g_publish_condition.wait_for(lock, stop, std::chrono::seconds(1),

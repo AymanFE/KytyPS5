@@ -2,6 +2,7 @@
 #include "common/ramStats.h"
 
 #include "common/assert.h"
+#include "common/cpuPlacement.h"
 #include "common/prepPhases.h"
 #include "common/crashContext.h"
 #include "common/emulatorConfig.h"
@@ -1403,6 +1404,7 @@ private:
 
 	void Run(const std::stop_token& stop) {
 		Profiler::SetThreadName("SpirvValidator");
+		Common::PlaceCurrentThreadCold();
 		for (;;) {
 			Job job;
 			{
@@ -2406,6 +2408,7 @@ struct PipelineCache::ProgramCache {
 	private:
 		void Run(const std::stop_token& stop) {
 			Profiler::SetThreadName("ProgramCacheCheck");
+		Common::PlaceCurrentThreadCold();
 			for (;;) {
 				BackgroundCheck job;
 				{
@@ -3952,6 +3955,7 @@ struct PipelineCache::LibraryState {
 
 	void Run(const std::stop_token& stop) {
 		Profiler::SetThreadName("PipelineOptimizer");
+		Common::PlaceCurrentThreadCold();
 		for (;;) {
 			Job job;
 			{
@@ -4071,7 +4075,8 @@ struct PipelineCache::FastFirstState {
 	      scheduler(static_cast<size_t>(std::clamp<uint64_t>(
 	                    FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_THREADS", 2), 1, 8)),
 	                static_cast<size_t>(std::clamp<uint64_t>(
-	                    FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_MAX_PENDING", 1024), 1, 1u << 20))),
+	                    FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_MAX_PENDING", 1024), 1, 1u << 20)),
+	                Common::PlaceCurrentThreadCold),
 	      retire_age_ns(FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_RETIRE_S", 60) * 1'000'000'000ull),
 	      drain_ms(FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_DRAIN_S", 5) * 1000ull),
 	      probe_supported(owner.m_graphics.pipeline_creation_cache_control_enabled),
@@ -4400,7 +4405,7 @@ struct PipelineCache::PrefetchState {
 		uint64_t ticket;
 	};
 	explicit PrefetchState(PipelineCache& owner, size_t threads)
-	    : cache(owner), queue(threads, 128) {}
+	    : cache(owner), queue(threads, 128, Common::PlaceCurrentThreadCold) {}
 	~PrefetchState() {
 		Stop();
 		for (auto& [key, job]: pending) {
@@ -4528,7 +4533,8 @@ struct PipelineCache::RtState {
 
 	explicit RtState(PipelineCache& owner)
 	    : cache(owner), wait_ms(WaitBudgetMs()),
-	      queue(static_cast<size_t>(std::clamp<uint64_t>(EnvU64("KYTY_RT_PIPELINE_THREADS", 2), 1, 4)), 64) {
+	      queue(static_cast<size_t>(std::clamp<uint64_t>(EnvU64("KYTY_RT_PIPELINE_THREADS", 2), 1, 4)), 64,
+	            Common::PlaceCurrentThreadCold) {
 		PipelineCacheLog("Software RT pipelines: built on {} background thread(s); a dispatch waits at most {} "
 		                 "for its kernel's pipeline, then is skipped until it is ready "
 		                 "(KYTY_RT_PIPELINE_WAIT_MS; KYTY_RT_PIPELINE_ASYNC=0 waits for it)",
@@ -4763,7 +4769,8 @@ bool DecodeJournalPayload(std::span<const uint8_t> bytes, JournalPayload& out) {
 // path (RtState). A dispatch that comes first builds its pipeline as usual and the prewarmed one is
 // dropped: wasted work, never a wait. KYTY_PIPELINE_PREWARM_THREADS (default 1, 4 when preparing, 1..8).
 struct PipelineCache::ComputePrewarm {
-	ComputePrewarm(PipelineCache& owner, size_t threads): cache(owner), queue(threads, SIZE_MAX) {}
+	ComputePrewarm(PipelineCache& owner, size_t threads)
+	    : cache(owner), queue(threads, SIZE_MAX, Common::PlaceCurrentThreadCold) {}
 	~ComputePrewarm() { Stop(); }
 	ComputePrewarm(const ComputePrewarm&)            = delete;
 	ComputePrewarm& operator=(const ComputePrewarm&) = delete;
@@ -4992,6 +4999,7 @@ struct PipelineCache::JournalReplay {
 	void Worker() {
 		if (low_priority) LowerCurrentThreadPriority();
 		Profiler::SetThreadName("PipelineJournal");
+		Common::PlaceCurrentThreadCold();
 		// The pipelines need the programs' modules: wait for the shader precompile replay.
 		if (cache.m_shader_precompiler != nullptr) cache.m_shader_precompiler->Wait();
 		std::call_once(order_once, [this] {
@@ -5615,6 +5623,7 @@ struct PipelineCache::StatsReporter {
 
 	void Run(const std::stop_token& stop) {
 		Profiler::SetThreadName("PipelineStats");
+		Common::PlaceCurrentThreadCold();
 		auto before    = Values();
 		auto before_ns = CompileClockNs();
 		std::unique_lock lock(mutex);
@@ -5914,6 +5923,7 @@ struct PipelineCache::DriverCacheSaver {
 
 	void Run(const std::stop_token& stop) {
 		Profiler::SetThreadName("PipelineCacheSaver");
+		Common::PlaceCurrentThreadCold();
 		std::mutex                  mutex;
 		std::condition_variable_any wake;
 		std::unique_lock            lock(mutex);
@@ -6177,7 +6187,10 @@ void PipelineCache::InitializeShaderPrecompile() {
 	    std::clamp<uint64_t>(EnvU64("KYTY_SHADER_PRECOMPILE_THREADS", prepare ? 8 : 2), 1, 16));
 	replay.low_priority = !prepare;
 	replay.max_entries = EnvU64("KYTY_SHADER_PRECOMPILE_MAX", 30000);
-	replay.thread_init = [](uint32_t) { Profiler::SetThreadName("ShaderPrecompile"); };
+	replay.thread_init = [](uint32_t) {
+		Profiler::SetThreadName("ShaderPrecompile");
+		Common::PlaceCurrentThreadCold();
+	};
 	// The software ray-tracing kernels first (and their pipelines, started as each is published):
 	// a cold pipeline build takes seconds, and the game needs them at its first lighting pass.
 	replay.priority_source = [](const ShaderJournal::Source& source) {

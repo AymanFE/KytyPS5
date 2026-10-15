@@ -187,8 +187,8 @@ private:
 // skips the rest.
 class FastFirstScheduler {
 public:
-	FastFirstScheduler(size_t threads, size_t max_pending)
-	    : m_cap(std::max<size_t>(1, max_pending)), m_queue(threads, SIZE_MAX) {}
+	FastFirstScheduler(size_t threads, size_t max_pending, std::function<void()> thread_init = {})
+	    : m_cap(std::max<size_t>(1, max_pending)), m_queue(threads, SIZE_MAX, std::move(thread_init)) {}
 	FastFirstScheduler(const FastFirstScheduler&)            = delete;
 	FastFirstScheduler& operator=(const FastFirstScheduler&) = delete;
 	~FastFirstScheduler() { Stop(0); }

@@ -16,8 +16,15 @@ namespace Libs::Graphics {
 // Tasks must publish failures to their owner (std::packaged_task does this automatically).
 class PipelineCompileQueue {
 public:
-	explicit PipelineCompileQueue(size_t threads, size_t limit): m_limit(limit) {
-		for (size_t i = 0; i < threads; ++i) m_threads.emplace_back([this] { Run(); });
+	// `thread_init` runs first on each worker (Common::PlaceCurrentThreadCold in the emulator).
+	explicit PipelineCompileQueue(size_t threads, size_t limit, std::function<void()> thread_init = {})
+	    : m_limit(limit) {
+		for (size_t i = 0; i < threads; ++i) {
+			m_threads.emplace_back([this, thread_init] {
+				if (thread_init) thread_init();
+				Run();
+			});
+		}
 	}
 	~PipelineCompileQueue() { Stop(); }
 	PipelineCompileQueue(const PipelineCompileQueue&) = delete;

@@ -1,5 +1,6 @@
 #include "common/liveSwitch.h"
 
+#include "common/cpuPlacement.h"
 #include "common/hangTrace.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -218,6 +219,7 @@ bool ReadWholeFile(const std::string& path, std::string& out) {
 
 void PollLoop() {
 	Profiler::SetThreadName("Kyty.Live");
+	Common::PlaceCurrentThreadCold();
 #if defined(_WIN32)
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 #endif

@@ -1,5 +1,6 @@
 #include "common/profiler.h"
 
+#include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
@@ -1548,6 +1549,7 @@ void Initialize() {
 		try {
 			g_loading_publisher = std::jthread([](std::stop_token stop) {
 				tracy::SetThreadName("Loading diagnostics");
+				Common::PlaceCurrentThreadCold();
 				const auto start = FrameWaitClockNs();
 				auto log = OpenLoadingLog();
 				auto apr_log = OpenLoadingLog(true);
