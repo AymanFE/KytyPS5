@@ -4735,6 +4735,26 @@ void TestNewShaderDecoderArchitecture() {
             byte_left_shift.src1.value == 1u,
         "decoder rejected or misdecoded captured V_LSHLREV_B32 byte shift");
 
+  const uint32_t vop2_sdwa_byte_left_destination[] = {
+      0x340a08f9u, 0x01861187u, // v_lshlrev_b32 v5.byte1, 7, v4.byte1; preserve
+  };
+  Instruction byte_left_destination;
+  ShaderRecompiler::Decoder::DecodeInstruction(vop2_sdwa_byte_left_destination, 0u,
+                                               byte_left_destination);
+  Check(byte_left_destination.family == Family::VOP2 &&
+            byte_left_destination.opcode == Opcode::V_LSHLREV_B32 &&
+            byte_left_destination.word_count == 2u &&
+            byte_left_destination.dst.reg == 5u &&
+            byte_left_destination.dst.sdwa_sel == 1u &&
+            byte_left_destination.dst.sdwa_dst_unused == 2u &&
+            byte_left_destination.dst.explicit_sdwa_dst &&
+            byte_left_destination.src0.kind == OperandKind::IntegerInlineConstant &&
+            byte_left_destination.src0.value == 7u &&
+            byte_left_destination.src0.sdwa_sel == 6u &&
+            byte_left_destination.src1.kind == OperandKind::Vgpr &&
+            byte_left_destination.src1.reg == 4u && byte_left_destination.src1.sdwa_sel == 1u,
+        "decoder rejected or misdecoded captured V_LSHLREV_B32 byte destination");
+
   const uint32_t mimg_nsa[] = {EncodeMimg0(0x20, 0xf) | (3u << 1u),
                                EncodeMimg1(4, 0, 1, 8), 0x03020100u,
                                0x07060504u, 0x0b0a0908u};
@@ -5504,6 +5524,26 @@ void TestNewShaderRecompilerCubeSampleCoordinates() {
 
 void TestImageAddressOperands() {
   using namespace ShaderRecompiler;
+  // Captured at PC 0x10cc in compute shader 0041b6a03db7472d.
+  const uint32_t captured[] = {0xf130010au, 0x00a30013u, 0x00161a19u};
+  Decoder::Instruction gather;
+  Decoder::DecodeInstruction(captured, 0, gather);
+  Check(gather.opcode == Decoder::Opcode::IMAGE_GATHER4_C_L &&
+            gather.opcode_id == 0x4cu && gather.word_count == 3u &&
+            gather.image_dimension == Decoder::ImageDimension::Dim2D &&
+            gather.dmask == 1u && gather.data_components == 4u &&
+            gather.data_dwords == 4u && gather.data_bits == 32u &&
+            gather.image_sample_flags == (Decoder::ImageSampleFlagCompare |
+                                           Decoder::ImageSampleFlagLod) &&
+            gather.image_address_components == 4u && gather.image_nsa_dwords == 1u &&
+            gather.dst.reg == 0u && gather.src0.reg == 19u &&
+            gather.src1.reg == 12u && gather.src2.reg == 20u &&
+            gather.image_nsa_addr[0] == 25u && gather.image_nsa_addr[1] == 26u &&
+            gather.image_nsa_addr[2] == 22u && !gather.glc && !gather.slc &&
+            !gather.image_r128,
+        "captured IMAGE_GATHER4_C_L lost compare/LOD, NSA, or result metadata");
+  Check(Decoder::InstructionToString(gather).find("IMAGE_GATHER4_C_L") != std::string::npos,
+        "captured IMAGE_GATHER4_C_L is missing from the decoded dump");
   struct Case {
     uint32_t opcode;
     uint32_t dimension;
@@ -5518,6 +5558,7 @@ void TestImageAddressOperands() {
       Case{0x20, 1, true, false, 2, 1},  // packed xy
       Case{0x3d, 1, true, false, 5, 4},  // offset, half bias, full dref, packed xy
       Case{0x20, 2, true, true, 3, 2},   // packed xy/z in nonconsecutive VGPRs
+      Case{0x4c, 1, false, true, 4, 4},  // full dref, xy, and LOD in NSA VGPRs
       Case{0x0e, 1, false, false, 1, 1}, // resource query mip
   };
   for (const auto &test : cases) {
@@ -5539,6 +5580,12 @@ void TestImageAddressOperands() {
     options.stage = ShaderType::Compute;
     options.input_info.compute = &compute;
     auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded), options);
+    if (test.opcode == 0x4cu) {
+      Check(program.memory_info.size() == 1u &&
+                program.memory_info[0].image_sample_flags == gather.image_sample_flags &&
+                program.memory_info[0].data_dwords == 4u,
+            "IMAGE_GATHER4_C_L lost its shared compare/LOD metadata during translation");
+    }
     IR::RewriteToSsa(program.blocks);
     IR::ConstantPropagationPass(program.blocks);
     uint32_t addresses = 0;
@@ -13675,7 +13722,7 @@ void TestNewShaderRecompilerNativeBindingPlan() {
   using BindingKind = ShaderRecompiler::IR::DescriptorBindingKind;
 
   const uint32_t shader[] = {
-      EncodeSmem0(0x08, 0, 4),
+      EncodeSmem0(0x08, 0, 16),
       0u, // s_buffer_load_dword s0
       EncodeVop1(0x01, 0, 0),
       EncodeMubuf0(0x1c, 8),
@@ -13693,6 +13740,13 @@ void TestNewShaderRecompilerNativeBindingPlan() {
 
   auto user_data = ImageTestUserData();
   SetImageTestFormat(&user_data, 6, Prospero::BufferFormat::k32UInt);
+  // Buffers have their own nonempty V# descriptors, disjoint from the T#/S# data.
+  for (const auto start : {4u, 32u}) {
+    user_data[start] = 0x1000u + start * 0x100u;
+    user_data[start + 1u] = 4u << 16u;
+    user_data[start + 2u] = 0x1000u;
+    user_data[start + 3u] = 3u << 28u;
+  }
   auto options = MakeCompileOptions(ShaderType::Compute);
   options.dump_ir = true;
   options.user_data = user_data;
@@ -14883,6 +14937,78 @@ void TestGraphicsPushConstantPlacement() {
   CheckSpirvBinaryValidates(placed.spirv);
 }
 
+void TestCapturedBufferLoadUbyteD16Decode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe080e000u, 0x80040003u};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_LOAD_UBYTE_D16 &&
+            inst.word_count == 2 && inst.data_dwords == 1 && inst.data_bits == 8 &&
+            !inst.data_signed && !inst.formatted && !inst.typed,
+        "captured BUFFER_LOAD_UBYTE_D16 lost its unsigned byte payload");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 0 &&
+            inst.dst.sdwa_sel == 4 && inst.dst.sdwa_dst_unused == 2 &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 3 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 16 &&
+            inst.src2.kind == Decoder::OperandKind::IntegerInlineConstant && inst.src2.value == 0 &&
+            inst.idxen && !inst.offen && inst.offset == 0 && inst.glc && inst.dlc && !inst.slc,
+        "captured BUFFER_LOAD_UBYTE_D16 lost its preserved half, address, or coherence flags");
+}
+
+void TestCapturedBufferStoreShortD16HiDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe06c6000u, 0x80010326u};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_STORE_SHORT_D16_HI &&
+            inst.word_count == 2 && inst.data_dwords == 1 && inst.data_bits == 16 &&
+            !inst.data_signed && !inst.formatted && !inst.typed,
+        "captured BUFFER_STORE_SHORT_D16_HI lost its raw halfword payload");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 3 &&
+            inst.dst.sdwa_sel == 5 && !inst.dst.sdwa_sext &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 38 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 4 &&
+            inst.src2.kind == Decoder::OperandKind::IntegerInlineConstant && inst.src2.value == 0 &&
+            inst.idxen && !inst.offen && inst.offset == 0 && inst.glc && !inst.dlc && !inst.slc,
+        "captured BUFFER_STORE_SHORT_D16_HI lost its high half, address, or coherence flags");
+}
+
+void TestCapturedBufferStoreFormatD16HiXDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe09c6000u, 0x80010007u};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_STORE_FORMAT_D16_HI_X &&
+            inst.word_count == 2 && inst.data_dwords == 1 && inst.data_bits == 16 &&
+            inst.data_components == 0 && inst.formatted && !inst.typed,
+        "captured BUFFER_STORE_FORMAT_D16_HI_X lost its one formatted halfword");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 0 &&
+            inst.dst.sdwa_sel == 5 && !inst.dst.sdwa_sext &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 7 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 4 &&
+            inst.src2.kind == Decoder::OperandKind::IntegerInlineConstant && inst.src2.value == 0 &&
+            inst.idxen && !inst.offen && inst.offset == 0 && inst.glc && !inst.dlc && !inst.slc,
+        "captured BUFFER_STORE_FORMAT_D16_HI_X lost its high half, index, or coherence flags");
+}
+
+void TestCapturedBufferStoreD16XyzwDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe21c6000u, 0x8002000eu};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_STORE_FORMAT_D16_XYZW &&
+            inst.word_count == 2 && inst.data_dwords == 2 && inst.data_bits == 16 &&
+            inst.data_components == 4 && inst.formatted && !inst.typed,
+        "captured D16 XYZW store lost its four components in two packed VGPRs");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 0 &&
+            inst.dst.sdwa_sel == 6 &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 14 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 8 &&
+            inst.src2.kind == Decoder::OperandKind::IntegerInlineConstant && inst.src2.value == 0 &&
+            inst.idxen && !inst.offen && inst.offset == 0 && inst.glc && !inst.dlc && !inst.slc,
+        "captured D16 XYZW store lost its full source VGPRs, index, or coherence flags");
+}
+
 void TestNewShaderRecompilerUnsupportedMemoryDecode() {
   const uint32_t mubuf_unknown[] = {EncodeMubuf0(0x7b), EncodeMubuf1(0, 0, 1),
                                     0xbf810000u};
@@ -15992,6 +16118,10 @@ int main(int argc, char **argv) {
   TestComputeLdsAllocationIdentity();
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();
+  TestCapturedBufferLoadUbyteD16Decode();
+  TestCapturedBufferStoreShortD16HiDecode();
+  TestCapturedBufferStoreFormatD16HiXDecode();
+  TestCapturedBufferStoreD16XyzwDecode();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
   TestRdna2IsaAccuracyDecode();
   TestRdna2LdsWaitcntBarrierAndFloatControls();

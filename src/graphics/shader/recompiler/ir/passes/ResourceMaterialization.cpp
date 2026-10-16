@@ -168,6 +168,7 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 	    type != Prospero::ImageType::kColor2DMsaa) {
 		return false;
 	}
+	if (!IsValidImageSwizzle(words[3] & 0xfffu)) return false;
 	const bool array = type == Prospero::ImageType::kColor1DArray ||
 	                   type == Prospero::ImageType::kColor2DArray ||
 	                   type == Prospero::ImageType::kColor2DMsaaArray ||
@@ -175,15 +176,15 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 	if (array && ((words[4] >> 16u) & 0x1fffu) > (words[4] & 0x1fffu)) {
 		return false;
 	}
+	const auto base_level = (words[3] >> 12u) & 0xfu;
+	const auto last_level = (words[3] >> 16u) & 0xfu;
 	if (type == Prospero::ImageType::kColor2DMsaa ||
 	    type == Prospero::ImageType::kColor2DMsaaArray) {
-		const auto base_level = (descriptor.dwords[3] >> 12u) & 0xfu;
-		const auto fragments  = (descriptor.dwords[3] >> 16u) & 0xfu;
 		const auto max_mip    = (descriptor.dwords[5] >> 4u) & 0xfu;
-		return base_level == 0 && fragments >= 1 && fragments <= 3 &&
-		       (r128 || max_mip == fragments);
+		return base_level == 0 && last_level >= 1 && last_level <= 3 &&
+		       (r128 || max_mip == last_level);
 	}
-	return true;
+	return base_level <= last_level;
 }
 
 // A null image keeps the draw alive, but the walk read something that is not a descriptor (all-zero
@@ -239,6 +240,8 @@ uint32_t ImageMipCount(const ImageResource& image, const DescriptorValue& descri
 	}
 	const auto base = (descriptor.dwords[3] >> 12u) & 0xfu;
 	const auto last = (descriptor.dwords[3] >> 16u) & 0xfu;
+	// Validated descriptors (ValidImageDescriptor) never have base > last; descriptors that reach
+	// specialization without that check still fail it below instead of wrapping around.
 	return base <= last ? last - base + 1u : 0u;
 }
 
@@ -1578,14 +1581,23 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 					if (memory.formatted && !memory.typed) {
 						const auto& buffer = buffers[memory.resource];
 						const auto format = Format::GetFormatInfo(buffer.descriptor_format);
-						for (uint32_t component = 0; component < count; component++) {
+						const bool d16 = memory.data_bits == 16u;
+						const auto components = d16 ? memory.component_count : count;
+						std::array<uint32_t, 4> constants {};
+						for (uint32_t component = 0; component < components; component++) {
 							if (format.type == Format::ComponentType::Unknown ||
 							    GetDstSel(buffer.descriptor_swizzle, component) != 1u) continue;
-							const auto one = Format::FormattedConstantBits(
+							auto one = Format::FormattedConstantBits(
 							    format, Format::FormattedSourceKind::One);
+							if (d16 && one == 0x3f800000u) one = 0x3c00u;
+							constants[d16 ? component / 2u : component] |=
+							    one << (d16 ? (component % 2u) * 16u : 0u);
+						}
+						for (uint32_t component = 0; component < count; component++) {
+							if (constants[component] == 0u) continue;
 							values[component] = Value(&*block->PrependNewInst(
 							    it, ValueOpcode::SelectU32,
-							    {inst.Arg(inst.NumArgs() - 1), Value(one), Value(0u)}));
+							    {inst.Arg(inst.NumArgs() - 1), Value(constants[component]), Value(0u)}));
 						}
 					}
 					Value result = values[0];

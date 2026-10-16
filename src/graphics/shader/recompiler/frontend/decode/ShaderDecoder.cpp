@@ -152,6 +152,7 @@ std::string FormatMimg(const Instruction& inst) {
 		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
+		case Opcode::IMAGE_GATHER4_C_L:
 		case Opcode::IMAGE_GATHER4_C_LZ:
 		case Opcode::IMAGE_GATHER4_LZ_O:
 		case Opcode::IMAGE_GATHER4_C_O:
@@ -652,6 +653,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
+		case Opcode::IMAGE_GATHER4_C_L:
 		case Opcode::IMAGE_GATHER4_C_LZ:
 		case Opcode::IMAGE_GATHER4_LZ_O:
 		case Opcode::IMAGE_GATHER4_C_O:
@@ -674,12 +676,16 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::BUFFER_LOAD_FORMAT_XYZ:
 		case Opcode::BUFFER_LOAD_FORMAT_XYZW:
 		case Opcode::BUFFER_LOAD_FORMAT_D16_X:
+		case Opcode::BUFFER_LOAD_FORMAT_D16_XYZW:
 		case Opcode::BUFFER_STORE_FORMAT_X:
 		case Opcode::BUFFER_STORE_FORMAT_XY:
 		case Opcode::BUFFER_STORE_FORMAT_XYZ:
 		case Opcode::BUFFER_STORE_FORMAT_XYZW:
 		case Opcode::BUFFER_STORE_FORMAT_D16_X:
+		case Opcode::BUFFER_STORE_FORMAT_D16_HI_X:
+		case Opcode::BUFFER_STORE_FORMAT_D16_XYZW:
 		case Opcode::BUFFER_LOAD_UBYTE:
+		case Opcode::BUFFER_LOAD_UBYTE_D16:
 		case Opcode::BUFFER_LOAD_USHORT:
 		case Opcode::BUFFER_LOAD_SHORT_D16:
 		case Opcode::BUFFER_LOAD_SHORT_D16_HI:
@@ -688,7 +694,9 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::BUFFER_LOAD_DWORDX3:
 		case Opcode::BUFFER_LOAD_DWORDX4:
 		case Opcode::BUFFER_STORE_BYTE:
+		case Opcode::BUFFER_STORE_BYTE_D16_HI:
 		case Opcode::BUFFER_STORE_SHORT:
+		case Opcode::BUFFER_STORE_SHORT_D16_HI:
 		case Opcode::BUFFER_STORE_DWORD:
 		case Opcode::BUFFER_STORE_DWORDX2:
 		case Opcode::BUFFER_STORE_DWORDX3:

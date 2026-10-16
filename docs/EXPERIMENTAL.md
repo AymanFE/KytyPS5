@@ -300,7 +300,7 @@ bundled preset. This release was checked with single timed runs, not with an alt
 
 ## Launching
 
-Extract the archive and open `launcher.exe` directly. When `u59-preset.json` is beside the executable, the launcher
+Extract the archive and open `kyty_launcher.exe` directly (named `launcher.exe` before upsync 5). When `u59-preset.json` is beside the executable, the launcher
 applies its environment and clears inherited KYTY/TRACY variables. The archive contains no `Kyty.ini`: the launcher uses
 the shared settings file `C:\ProgramData\Kyty\Kyty.ini`, so existing game directories and per-game settings stay
 available. If an older archive left a `Kyty.ini` beside the launcher, move it aside. No game files, saves, caches or
@@ -344,7 +344,8 @@ buffer's state. Send the console text from the last summary line on. The diagnos
 - The PGO profile comes from Astro Bot only. Other games run with code laid out for Astro Bot.
 - Microsoft Defender flagged the int7 `launcher.exe` as `Trojan:Win32/Bearfoos.A!ml` on the test PC. The `!ml` marks a
   machine-learning verdict, not the signature of known malware. The launcher is built by the GitHub Actions workflow
-  `.github/workflows/u59-windows-release.yml` from `src/launcher` in this repository.
+  `.github/workflows/u59-windows-release.yml` from `src/launcher` in this repository. Since upsync 5 it is named
+  `kyty_launcher.exe`, as upstream renamed it.
 - The upstream controller and audio changes were not tested by hand.
 - The preset also sets `KYTY_SRT_VARIANT_READS=1`, which Demon's Souls needs.
 
@@ -364,7 +365,7 @@ Release with Ninja in an x64 Visual Studio developer shell, as in `.github/workf
   developer statistics (`KYTY_CP_COMMIT_STATS`, `KYTY_BUFFER_LOOKUP_STATS`, which are then ignored). The hang
   watchdog, crash context and hang trace are unaffected. Keep the default `ON` to use those statistics.
 - Build `launcher` and `kyty_emulator`, install to `_Build/windows/install`, and copy `tools/u59-preset.json` beside
-  `launcher.exe`.
+  `kyty_launcher.exe`.
 
 The Windows release is produced by a tagged GitHub Actions build. Original licenses and credits remain intact.
 Personal handoffs, local editor configuration, captures, saves and caches are excluded. Historical results and their

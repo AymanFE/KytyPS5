@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-// u59-preset.json: the KYTY_*/TRACY_* environment the release archive ships next to launcher.exe.
+// u59-preset.json: the KYTY_*/TRACY_* environment the release archive ships next to kyty_launcher.exe.
 // The launcher loads it (Load) and puts its variables into the environment of every game it starts;
 // a launcher that does not find it says where it looked (Describe). At startup the emulator checks
 // whether the preset's settings reached it (StartupWarnings): a direct start of kyty_emulator, or a

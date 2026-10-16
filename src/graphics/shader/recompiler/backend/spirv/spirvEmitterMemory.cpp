@@ -863,6 +863,61 @@ uint32_t FormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 	});
 }
 
+// Formatted vector loads; D16 (BUFFER_LOAD_FORMAT_D16_XYZW) packs component pairs into dwords.
+uint32_t LoadFormattedPrepared(ValueEmitContext& ctx, const IR::Inst& inst,
+                               const IR::MemoryInfo& mem, const MemoryResourceAccess& resource,
+                               const Format::BufferFormatInfo& info, uint32_t components) {
+	auto&      state = ctx.state;
+	const auto count = mem.data_bits == 16u ? mem.component_count : components;
+	const auto plan  = PrepareFormattedMemory(ctx, inst, mem, resource, info);
+	const auto value = EmitValueOrDefaultIfCondition(
+	    state, plan.in_bounds, TypeU32Composite(state, count),
+	    FormattedOutOfBoundsValue(ctx, mem, plan, count), [&]() {
+		    std::array<uint32_t, 4> values {};
+		    for (uint32_t component = 0; component < count; component++) {
+			    values[component] = LoadFormattedInBounds(ctx, mem, plan, component);
+		    }
+		    return ConstructU32Composite(state, count, values);
+	    });
+	if (mem.data_bits != 16u) return value;
+	const bool integer = info.type == Format::ComponentType::Uint ||
+	                     info.type == Format::ComponentType::Sint;
+	const auto scalar = [&](uint32_t component) {
+		if (component >= count) return integer ? ConstantU32(state, 0u) : ConstantF32(state, 0);
+		auto result = value;
+		if (count != 1u) {
+			result = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), result, value,
+			                          component);
+		}
+		if (info.type == Format::ComponentType::Uint) {
+			return EmitUMin32(state, result, ConstantU32(state, 0xffffu));
+		}
+		if (info.type == Format::ComponentType::Sint) {
+			const auto lower = EmitSMax32(state, result, ConstantU32(state, 0xffff8000u));
+			return EmitSMin32(state, lower, ConstantU32(state, 0x7fffu));
+		}
+		return EmitBitCastF32U32(state, result);
+	};
+	std::array<uint32_t, 4> packed {};
+	for (uint32_t word = 0; word < components; word++) {
+		const auto low  = scalar(word * 2u);
+		const auto high = scalar(word * 2u + 1u);
+		if (integer) {
+			packed[word] = Binary(
+			    state, spv::OpBitwiseOr, TypeU32(state),
+			    Binary(state, spv::OpBitwiseAnd, TypeU32(state), low, ConstantU32(state, 0xffffu)),
+			    Binary(state, spv::OpShiftLeftLogical, TypeU32(state), high, ConstantU32(state, 16u)));
+		} else {
+			const auto pair = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair,
+			                          low, high);
+			packed[word] = EmitPackHalf2x16(state, pair);
+		}
+	}
+	return ConstructU32Composite(state, components, packed);
+}
+
 uint32_t EncodeFormattedStoreComponent(ValueEmitContext& ctx,
                                        const Format::BufferFormatInfo& info,
                                        uint32_t component, uint32_t data, uint32_t data_bits) {
@@ -911,18 +966,23 @@ void StoreFormattedPrepared(ValueEmitContext& ctx, const IR::Inst& inst,
                              const Format::BufferFormatInfo& info, uint32_t data,
                              uint32_t components) {
 	// RDNA2 formatted stores transfer the entire format, zero-filling missing VGPRs.
+	const auto count = mem.data_bits == 16u ? mem.component_count : components;
 	const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
 	EmitIfCondition(ctx.state, plan.in_bounds, [&]() {
 		auto packed = ConstantU32(ctx.state, 0);
 		for (uint32_t component = 0; component < info.component_count; component++) {
 			auto value = ConstantU32(ctx.state, 0);
-			if (component < components) {
+			if (component < count) {
+				const auto word = mem.data_bits == 16u ? component / 2u : component;
 				value = data;
 				if (components != 1u) {
 					value = ctx.state.builder.AllocateId();
 					ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state),
-					                              value, data, component);
+					                              value, data, word);
 				}
+				if (mem.data_bits == 16u && (component & 1u) != 0u)
+					value = Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), value,
+					               ConstantU32(ctx.state, 16u));
 			}
 			value = EncodeFormattedStoreComponent(ctx, info, component, value, mem.data_bits);
 			const auto bits = info.component_bits[component];
@@ -1427,16 +1487,7 @@ uint32_t LoadWideBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t co
 		    const auto info = Format::GetFormatInfo(
 		        mem.formatted ? BufferFormat(ctx, mem) : Prospero::BufferFormat::kInvalid);
 		    if (info.type != Format::ComponentType::Unknown) {
-			    const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
-			    return EmitValueOrDefaultIfCondition(
-			        state, plan.in_bounds, TypeU32Composite(state, components),
-			        FormattedOutOfBoundsValue(ctx, mem, plan, components), [&]() {
-				        std::array<uint32_t, 4> values {};
-				        for (uint32_t component = 0; component < components; component++) {
-					        values[component] = LoadFormattedInBounds(ctx, mem, plan, component);
-				        }
-				        return ConstructU32Composite(state, components, values);
-			        });
+			    return LoadFormattedPrepared(ctx, inst, mem, resource, info, components);
 		    }
 		    std::array<uint32_t, 4> values {};
 		    for (uint32_t component = 0; component < components; component++) {
