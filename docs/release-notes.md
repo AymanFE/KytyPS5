@@ -1,28 +1,12 @@
-# KytyPS5 U59 int19.3
+# KytyPS5 U59 int19.4
 
-int19.3 is int19.2 plus the fifth sync with upstream KytyPS5, a device-loss fix, a shader accuracy fix and some opt-in switches; int19's notes are in docs/release-notes-history.md and on the int19 release page. The first launch rebuilds the shader and program caches once, so the first minutes can stutter.
+int19.4 is int19.1 plus the unreleased int19.2 and int19.3 work, more performance work and the latest upstream KytyPS5 changes; the older notes are in docs/release-notes-history.md. The first launch rebuilds the shader and program caches once, so the first minutes can stutter.
 
-- **Fixed (GPU device loss with sparse textures):** when a partially resident texture got more mip levels, Kyty bound the new memory on a second Vulkan queue while work already sent to the GPU could still use that texture, which the Vulkan specification does not allow. The bind is now ordered on the GPU after the work in flight, and later work waits for it. This fixed the `ErrorDeviceLost` in the user's galaxy-map case; confirmation on an RTX 4090 and an RTX 5070 is still pending.
-- **Fixed (shader accuracy):** `V_CVT_PKNORM_I16_F32` and `V_CVT_PKNORM_U16_F32` now turn NaN into 0, as the RDNA2 instruction set specifies (the signed form gave 0x7fff).
-- **New (automatic V-cache placement on dual-CCD X3D CPUs):** on a Ryzen 9 7900X3D, 7950X3D, 9900X3D or 9950X3D without Process Lasso, Kyty now keeps the game, command-processor and render threads on the CCD with the 3D V-cache and moves background threads (shader compiles, file I/O, watchdogs) to the other CCD. On a 7950X3D with an RTX 3090 and no Process Lasso, Sky Garden went from 34.1 to 45.8 fps; the world map did not change (it is limited by the GPU there). It does nothing when Process Lasso (or another tool) sets CPU sets or affinity for Kyty, and nothing on single-CCD or non-X3D CPUs. `KYTY_VCACHE_PLACEMENT=0` turns it off.
-- **Upstream sync 5** (143 upstream commits). Kyty's own defaults and the `u59-preset.json` behaviour stay as in int19.2. Taken from upstream, among others:
-  - Block-compressed (BC) textures in the PS5 R64 tiling mode are now accepted by the tiler (upstream b7b335ac6, `tile.cpp`).
-  - Pixel shaders: in ordinary draws, flat and smooth reads of the same vertex output now share one location and read the raw vertex values; rectangle lists keep their old handling. `KYTY_PS_PER_VERTEX=0` also turns this off.
-  - More GPU instructions and fixes (16-bit buffer loads, 64-bit compares, 64-bit LDS max and compare-exchange, signed 32-bit image atomics, R8 SNORM sampling, CMASK and RG32 clear decoding), uploads of images larger than the upload ring, a lost-completion fix for batched asynchronous file reads (APR), HDR presentation, the splash screen and a reorganised launcher (Kyty's audio sliders, occlusion and Intel CPU options are kept).
-  - Controllers: a game can now open only the standard pad port of the configured user, and only once. The first pad opens are printed in the console log, so a game that opens another port shows up there.
-- **New opt-in switches** (all off unless set):
-  - `KYTY_GPU_TIMESTAMP_SCALE=<100-200>`: stretches the GPU time the game measures within each frame by that percentage, so Astro Bot's dynamic resolution keeps a lower internal resolution.
-  - `KYTY_AFTERMATH=1`, for developers: NVIDIA Nsight Aftermath crash dumps on a device loss. Release builds do not include it; it works only in a build configured with the Aftermath SDK (CMake `KYTY_AFTERMATH_SDK`).
-  - `KYTY_AGC_CB_WATERMARK=1` and `KYTY_GUEST_PROBE`: diagnostics for Astro Bot's "too many objects/batches" stop (see docs/EXPERIMENTAL.md).
-  - `KYTY_READ_FAULT_DIAG` and `KYTY_READ_FAULT_PUBLISHED`: a diagnostic and an experiment for game threads that read GPU-written memory.
-- **Known issue:** if you still get a GPU device loss (`ErrorDeviceLost`), reproduce it once with `KYTY_DEVICE_FAULT_DIAGNOSTICS=1` and Printf output set to File, then attach `_kyty.txt` and the `_kyty` folder to an issue. Workaround: `KYTY_DEFER_PROTECTS=0` in `u59-preset.json`.
+- **Faster:** a few percent faster in scenes limited by the command processor. GPU compute dispatches the game does not order now overlap, shader code generation is tighter, more draws reuse the previous draw's state, empty indirect dispatches are skipped, and the release build has a new profile-guided optimisation profile recorded over several levels.
+- **New (automatic V-cache placement on dual-CCD X3D CPUs):** on a Ryzen 9 7900X3D, 7950X3D, 9900X3D or 9950X3D without Process Lasso, Kyty keeps the game, command-processor and render threads on the CCD with the 3D V-cache and moves background threads to the other CCD. It does nothing when Process Lasso (or another tool) sets CPU sets or affinity for Kyty, and nothing on other CPUs. `KYTY_VCACHE_PLACEMENT=0` turns it off.
+- **Fixed:** with the game's "[Performance]" patches on, the emulator no longer closes ("buffer ADD_TID is only valid for compute shaders") or freezes at some spots in Sky Garden (from int19.2).
+- **Fixed:** a GPU device loss (`ErrorDeviceLost`) when a partially resident texture got more mip levels, and NaN handling of two pack instructions (from int19.3).
+- **From upstream KytyPS5:** shader and texture fixes for other games (among them Demon's Souls), DLC and add-on support, input mapping tabs in the launcher with an emulated touchpad and rumble, and more system modules.
+- **Launcher renamed:** the launcher is now `kyty_launcher.exe`. Extracting over an old folder leaves the old `launcher.exe` behind; delete it and start `kyty_launcher.exe`.
+- **Known issues:** in some levels the game can stop with its own "too many objects/batches in this scene" error (`command_buffer_writer.ppr.cpp:31`); this is under investigation. If you get a GPU device loss, reproduce it once with `KYTY_DEVICE_FAULT_DIAGNOSTICS=1` and Printf output set to File, then attach `_kyty.txt` and the `_kyty` folder to an issue; workaround: `KYTY_DEFER_PROTECTS=0` in `u59-preset.json`.
 - **AMD, Intel and Linux users:** their fixes are in the int19 notes.
-
-## int19.2
-
-- **Fixed:** with the game's "[Performance]" patches on (no grass, SSAO/DoF/SSR off, ...), the emulator no longer closes ("SPIR-V validation failed ... buffer ADD_TID is only valid for compute shaders") and no longer drops to a few fps and freezes at some spots in Sky Garden. Leftover descriptors in slots the game does not use no longer compile a new shader version for every value.
-
-## int19.1
-
-- **Fixed:** the emulator no longer closes (`occlusion.cpp:405`) with "Accurate occlusion queries" on, seen in rocket_hourglass.
-- **Faster:** the release build's profile-guided optimisation profile was retrained on the int19 code, a few percent more fps in Sky Garden on an RTX 3090 / Ryzen 9 7950X3D.
