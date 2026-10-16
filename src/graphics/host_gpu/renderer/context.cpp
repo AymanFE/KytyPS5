@@ -37,6 +37,8 @@ namespace Libs::Graphics {
 // KYTY_CP_SINK_ROUTES (default 1, live): CommandBuffer::HelperSink() encodes for the recorder; 0
 // drains it and records natively, as the helpers' former Handle() did.
 static Live::Switch g_sink_routes("KYTY_CP_SINK_ROUTES", Live::ParseDefaultOn);
+// KYTY_DISPATCH_OVERLAP (render.h DispatchOverlapEnabled): live; default off.
+static Live::Switch g_dispatch_overlap("KYTY_DISPATCH_OVERLAP", Live::ParseDefaultOff);
 
 // ------------------------------------------------------------------------------------------------
 // Barrier batcher
@@ -306,6 +308,36 @@ void CommandBuffer::ResetBarrierState() const {
 	m_epoch_instance       = 0;
 	m_internal_recording   = 0;
 	m_feedback_keep.reset();
+	m_overlap_open         = false;
+}
+
+bool DispatchOverlapEnabled() {
+	return BarrierBatchEnabled() && g_dispatch_overlap.Get() != 0;
+}
+
+void CommandBuffer::NoteGuestDispatch(bool lds) const {
+	// Called right after the dispatch's ShaderAccess request: nothing may have been recorded or
+	// requested since the dispatch except that request.
+	m_overlap_open = BarrierBatchEnabled() && m_pending.has_memory && m_pending.images.empty() &&
+	                 m_pending.buffers.empty() && m_pending.uploads.empty() &&
+	                 m_pending.origins == OriginBit(BarrierOrigin::ShaderAccess);
+	m_overlap_lds = lds;
+}
+
+bool CommandBuffer::TakeDispatchOverlap(bool lds, bool take) const {
+	const bool open = m_overlap_open;
+	m_overlap_open  = false;
+	if (!open || lds || m_overlap_lds || !m_pending.has_memory || !m_pending.images.empty() ||
+	    !m_pending.buffers.empty() || !m_pending.uploads.empty() ||
+	    m_pending.origins != OriginBit(BarrierOrigin::ShaderAccess)) {
+		return false;
+	}
+	if (take) {
+		// The next dispatch's own ShaderAccess request covers the dropped one: its first scope is
+		// every earlier compute shader access, the dropped dispatch's included.
+		m_pending.Clear();
+	}
+	return true;
 }
 
 void CommandBuffer::NoteFeedbackKeep(const vk::ImageMemoryBarrier2& ordering) const {
@@ -597,6 +629,7 @@ void CommandBuffer::FlushBarriers() const {
 	// barriers were widened by the same scopes above.
 	m_epoch_clean    = m_pending.has_memory && IsFullBarrier(m_pending.memory);
 	m_epoch_instance = 0;
+	m_overlap_open   = false;
 	m_pending.Clear();
 }
 
@@ -631,6 +664,7 @@ bool CommandBuffer::CanSinkDrawWrites() const {
 
 void CommandBuffer::NoteDrawRecorded() const {
 	m_recorded_since_flush = true;
+	m_overlap_open         = false;
 	if (!(m_draw_scope && m_draw_safe && m_rendering && m_epoch_instance == m_rendering_serial)) {
 		m_epoch_clean = false;
 	}

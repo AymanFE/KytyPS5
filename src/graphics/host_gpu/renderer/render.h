@@ -194,6 +194,25 @@ struct DrawAutoArgs {
 // would still hold it (DescriptorSetAudit*; compare DescriptorSetsReused).
 [[nodiscard]] bool DescriptorSetReuseAuditEnabled();
 [[nodiscard]] bool UploadBatchEnabled();
+// KYTY_DISPATCH_OVERLAP (live, needs the batcher): consecutive direct guest dispatches that the
+// guest does not order overlap on the GPU, as on the console. Every dispatch requests, after
+// itself, a dependency from compute shader accesses to everything later (BarrierOrigin::
+// ShaderAccess), and a dispatch with storage writes one from everything earlier to it
+// (ShaderWriteHazard); between two dispatches they merge into one compute -> compute barrier that
+// serialized every dispatch pair. With the switch on, a direct dispatch drops the previous
+// dispatch's still-pending ShaderAccess request and skips its own ShaderWriteHazard when nothing at
+// all happened between the two (CommandBuffer::TakeDispatchOverlap): no command recorded, no other
+// barrier request, layout transition or upload queued, no guest packet other than register writes
+// executed (a draw, any synchronization packet, a label, a flush or a CP read breaks the chain),
+// and neither dispatch uses emulated LDS (one device buffer for every workgroup). The ShaderAccess
+// request of the later dispatch then orders both dispatches (its first scope is every earlier
+// compute shader access) before everything after them, so emulator copies, readbacks, draws and
+// guest-synchronized dispatches see exactly what they saw before. Only the two dispatches lose
+// their ordering against each other, which the guest never requested: its CS_PARTIAL_FLUSH,
+// ACQUIRE_MEM, RELEASE_MEM, EVENT_WRITE and WAIT_REG_MEM still become barriers or end the chain.
+// Indirect dispatches keep their barriers (their argument barrier serializes them anyway).
+// KYTY_DISPATCH_OVERLAP=0 restores the barrier pair between every two dispatches.
+[[nodiscard]] bool DispatchOverlapEnabled();
 
 // Attribution of batched barrier requests (gpuOpProfiler site of the recorded batch).
 enum class BarrierOrigin : uint32_t {
@@ -275,6 +294,19 @@ public:
 	                       std::span<const vk::BufferCopy> regions) const;
 	// Records the pending batch now (no-op when empty).
 	void FlushBarriers() const;
+	// KYTY_DISPATCH_OVERLAP (see DispatchOverlapEnabled()). After a direct guest dispatch and its
+	// ShaderAccess request: the chain is open while nothing else happens in this command buffer.
+	// lds: the dispatch uses emulated LDS (never overlapped).
+	void NoteGuestDispatch(bool lds) const;
+	// Ends the open chain (the command processor executed a packet other than a register write or
+	// a direct dispatch). Recording any command or flushing the batch ends it too.
+	void BreakDispatchOverlap() const noexcept { m_overlap_open = false; }
+	// At the next direct dispatch, after its bindings were committed and before its own barrier
+	// requests: whether the chain is still open, nothing but the previous dispatch's ShaderAccess
+	// request is pending, and neither dispatch uses emulated LDS. Always closes the chain. When it
+	// returns true and 	ake is set, the pending request was dropped: the caller skips its
+	// ShaderWriteHazard request and keeps its own ShaderAccess request after the dispatch.
+	[[nodiscard]] bool TakeDispatchOverlap(bool lds, bool take) const;
 	// Whether anything is pending, and whether queued upload copies are (RequestUploadCopy).
 	[[nodiscard]] bool HasPendingBarriers() const noexcept { return !m_pending.Empty(); }
 	[[nodiscard]] bool HasPendingUploads() const noexcept { return !m_pending.uploads.empty(); }
@@ -415,6 +447,7 @@ private:
 	void NoteForeignCommand() const {
 		m_recorded_since_flush = true;
 		m_epoch_clean          = false;
+		m_overlap_open         = false;
 	}
 	[[nodiscard]] bool CanSinkPending() const;
 	[[nodiscard]] bool CanSinkDrawWrites() const;
@@ -476,6 +509,9 @@ private:
 	mutable bool     m_draw_safe          = false;
 	// NoteFeedbackKeep() since the last BeginRendering() (at most one depth attachment per draw).
 	mutable std::optional<vk::ImageMemoryBarrier2> m_feedback_keep;
+	// KYTY_DISPATCH_OVERLAP: NoteGuestDispatch() since anything else happened (TakeDispatchOverlap).
+	mutable bool m_overlap_open = false;
+	mutable bool m_overlap_lds  = false;
 
 	// KYTY_CP_RECORDER: the scheduler's recorder and its encoder (null when off), and whether a
 	// direct window is open (the CP records natively after a drain; see Sink()).

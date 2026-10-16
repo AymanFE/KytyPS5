@@ -4188,6 +4188,11 @@ CpSeq::Result CommandProcessor::ExecuteOp(CpSeq::OpKind kind, const void* payloa
 		        ? EventWriteActivityName(static_cast<const CpSeq::EventWriteOp*>(payload)->event_type)
 		        : CpSeq::OpKindName(kind));
 	}
+	// KYTY_DISPATCH_OVERLAP (render.h): any operation but a direct dispatch (and the verifier's read
+	// checks) may order the dispatches around it: draws, synchronization, labels, waits, flips.
+	if (kind != OpKind::DispatchDirect && kind != OpKind::ReadCheck) {
+		CurrentBuffer().BreakDispatchOverlap();
+	}
 	CommitStats::StepMark(CommitStats::Step::GapOpHead);
 	switch (kind) {
 		case OpKind::DrawIndex: ExecDrawIndex(*static_cast<const CpSeq::DrawIndexOp*>(payload)); break;

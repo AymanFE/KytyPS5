@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
@@ -46,6 +47,51 @@
 #include <vector>
 
 namespace Libs::Graphics {
+// KYTY_DISPATCH_OVERLAP accounting, printed every 10 s once a direct dispatch ran:
+//   DispatchOverlap 10s (on|off): <direct> direct dispatches, <pairs> unordered pairs (<pct>%),
+//   <overlapped> overlapped, <indirect> indirect
+// An unordered pair is a direct dispatch that followed another with nothing in between (it would
+// overlap with the switch on); counted with the switch off too, for sizing.
+static std::atomic<uint64_t> g_overlap_direct {0}, g_overlap_pairs {0}, g_overlap_taken {0},
+    g_overlap_indirect {0};
+static std::atomic<int64_t> g_overlap_last_print_ns {0};
+
+static void PrintDispatchOverlap(bool enabled) {
+	const auto now = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                          std::chrono::steady_clock::now().time_since_epoch())
+	                                          .count());
+	auto last = g_overlap_last_print_ns.load(std::memory_order_relaxed);
+	if (last == 0) {
+		g_overlap_last_print_ns.store(now, std::memory_order_relaxed);
+		return;
+	}
+	if (now - last < 10'000'000'000ll ||
+	    !g_overlap_last_print_ns.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+		return;
+	}
+	const auto direct   = g_overlap_direct.exchange(0, std::memory_order_relaxed);
+	const auto pairs    = g_overlap_pairs.exchange(0, std::memory_order_relaxed);
+	const auto taken    = g_overlap_taken.exchange(0, std::memory_order_relaxed);
+	const auto indirect = g_overlap_indirect.exchange(0, std::memory_order_relaxed);
+	std::printf("DispatchOverlap 10s (%s): %llu direct dispatches, %llu unordered pairs (%.1f%%), "
+	            "%llu overlapped, %llu indirect\n",
+	            enabled ? "on" : "off", static_cast<unsigned long long>(direct),
+	            static_cast<unsigned long long>(pairs),
+	            direct != 0 ? 100.0 * static_cast<double>(pairs) / static_cast<double>(direct) : 0.0,
+	            static_cast<unsigned long long>(taken), static_cast<unsigned long long>(indirect));
+}
+
+static void CountDispatchOverlap(bool unordered, bool enabled) {
+	g_overlap_direct.fetch_add(1, std::memory_order_relaxed);
+	if (unordered) {
+		g_overlap_pairs.fetch_add(1, std::memory_order_relaxed);
+		if (enabled) {
+			g_overlap_taken.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	PrintDispatchOverlap(enabled);
+}
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -492,7 +538,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                           ShaderRecompiler::IR::ImageResourceClass::Storage;
 	                }) ||
 	    has_storage_writes;
-	if (has_storage_writes) {
+	// KYTY_DISPATCH_OVERLAP (render.h): nothing happened since the previous dispatch, so the guest
+	// did not order the two; its pending ShaderAccess request is dropped and this dispatch skips
+	// its own hazard request. Emulated LDS (one device buffer) and BDA-write settles never overlap.
+	const bool no_overlap      = bindings.shared_memory.buffer != nullptr || program.info.bda_writes;
+	const bool overlap_enabled = DispatchOverlapEnabled();
+	const bool overlap         = buffer.TakeDispatchOverlap(no_overlap, overlap_enabled);
+	CountDispatchOverlap(overlap, overlap_enabled);
+	if (has_storage_writes && !(overlap && overlap_enabled)) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.
 		ShaderWriteHazardBarrier(buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -561,6 +614,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(buffer, vk::PipelineStageFlagBits::eComputeShader);
+	buffer.NoteGuestDispatch(no_overlap);
 	if (program.info.bda_writes) {
 		m_context.GetBufferCache().SettleBdaWrites(program.shader_hash);
 	}
@@ -624,6 +678,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                                       uint64_t args_addr, uint32_t mode, bool async_compute) {
 	KYTY_GPU_OP_SITE("dispatch.indirect");
+	g_overlap_indirect.fetch_add(1, std::memory_order_relaxed);
 	const CpGaps::Scope gap(CpGaps::Cat::DispatchOp);
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
