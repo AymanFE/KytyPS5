@@ -1261,6 +1261,17 @@ int KYTY_SYSV_ABI KernelTruncate(const char* path, int64_t length) {
 
 	std::error_code error;
 	const auto      status = std::filesystem::status(real_name, error);
+	if (error || !std::filesystem::exists(status)) {
+		// A parent component that is a file: ENOTDIR, as POSIX reports it (on Windows the lookup
+		// only fails as "missing").
+		std::error_code parent_error;
+		const auto      parent =
+		    std::filesystem::status(std::filesystem::path(real_name).parent_path(), parent_error);
+		if (!parent_error && std::filesystem::exists(parent) &&
+		    !std::filesystem::is_directory(parent)) {
+			return KERNEL_ERROR_ENOTDIR;
+		}
+	}
 	if (!error) {
 		if (!std::filesystem::exists(status)) {
 			return KERNEL_ERROR_ENOENT;
