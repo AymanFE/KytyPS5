@@ -240,7 +240,9 @@ uint32_t ImageMipCount(const ImageResource& image, const DescriptorValue& descri
 	}
 	const auto base = (descriptor.dwords[3] >> 12u) & 0xfu;
 	const auto last = (descriptor.dwords[3] >> 16u) & 0xfu;
-	return last - base + 1u;
+	// Validated descriptors (ValidImageDescriptor) never have base > last; descriptors that reach
+	// specialization without that check still fail it below instead of wrapping around.
+	return base <= last ? last - base + 1u : 0u;
 }
 
 bool DecodeBufferDescriptor(const DescriptorValue& descriptor, ShaderBufferResource& result) {
@@ -691,6 +693,10 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			return SpecializationFail(fmt::format("image resource {} has an invalid class", i));
 		}
 		image.mip_count = ImageMipCount(base, descriptor);
+		if (image.mip_count == 0u) {
+			return SpecializationFail(
+			    fmt::format("image descriptor {} has an invalid mip range", i));
+		}
 		if (NullImageDescriptor(descriptor)) {
 			image.numeric_class = base.atomic ? Prospero::TextureNumericClass::Uint
 			                                  : Prospero::TextureNumericClass::Float;

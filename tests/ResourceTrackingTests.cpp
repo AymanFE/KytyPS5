@@ -1915,9 +1915,17 @@ void TestDynamicStorageMipTracking() {
   changed_user_data[3] =
       (changed_user_data[3] & ~((0xfu << 12u) | (0xfu << 16u))) |
       (4u << 12u) | (3u << 16u);
-  Check(!MaterializeResources(resource_plan, {.user_data = changed_user_data},
-                              changed_snapshot, changed_specialization),
-        "an inverted dynamic storage mip range was accepted");
+  // Upstream bcf13e101: an inverted mip range is not a valid descriptor; it binds as null.
+  Check(MaterializeResources(resource_plan, {.user_data = changed_user_data},
+                             changed_snapshot, changed_specialization) &&
+            !changed_snapshot.images.empty() &&
+            std::ranges::all_of(changed_snapshot.images, [](const auto& image) {
+              return std::ranges::all_of(image.dwords, [](uint32_t word) { return word == 0u; });
+            }) &&
+            std::ranges::all_of(changed_specialization.images,
+                                [](const auto& image) { return image.mip_count == 1u; }) &&
+            changed_specialization != specialization,
+        "an inverted mip range was not normalized to a null image");
 }
 
 void TestSrtFlatteningAndRuntimeMemoization() {
