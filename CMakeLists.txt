@@ -1767,6 +1767,20 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
 	set_tests_properties(draw_prep_engine_parallel_run_acquire PROPERTIES
 		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1")
+	# KYTY_DRAW_RUN_TARGETS: draws that do not continue keep the record's targets (the alternating
+	# S# variants draw without a depth target); on and verified, inline and parallel.
+	add_test(NAME draw_run_inline_targets
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_inline_targets PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_TARGETS=1")
+	add_test(NAME draw_run_inline_targets_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_inline_targets_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_TARGETS=exit")
+	add_test(NAME draw_run_parallel_bindings_targets
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_parallel_bindings_targets PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_TARGETS=1")
 	# KYTY_DRAW_RUN_WRITES: draws that store through a V# form runs (and one storing over its own
 	# texture never continues); off, on, verified, inline and parallel.
 	add_test(NAME draw_run_writes_off

@@ -2098,12 +2098,18 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		const CommitStats::SubScope color_scope(CommitStats::Sub::ColorTargets);
 		state.color_count         = m_run.color_count;
 		state.color_slots_written = m_run.color_slots;
+		// As the resolution does: only a resolved target is marked (a draw without a depth target,
+		// or a colour entry without an image, has an invalid id).
 		for (uint32_t i = 0; i < m_run.color_count; i++) {
 			state.color_info[i] = m_run.colors[i];
-			BindRenderTarget(state.color_info[i].image_id);
+			if (state.color_info[i].image_id) {
+				BindRenderTarget(state.color_info[i].image_id);
+			}
 		}
 		state.depth_info = m_run.depth[0];
-		BindRenderTarget(state.depth_info.image_id);
+		if (state.depth_info.image_id) {
+			BindRenderTarget(state.depth_info.image_id);
+		}
 		m_run_targets_kept = true;
 	} else {
 		DrawRunTargets(buffer, draw, render_target_slice_offset, state);
