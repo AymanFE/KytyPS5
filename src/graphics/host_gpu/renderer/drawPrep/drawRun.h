@@ -3,6 +3,7 @@
 
 #include "common/liveSwitch.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -259,6 +260,82 @@ struct Totals {
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};
 };
 [[nodiscard]] Totals& GetTotals();
+
+// KYTY_DRAW_RUN_KEY_DIAG (live, default 0; diagnostic only, with KYTY_DRAW_RUN on): why committed
+// draws do not continue the run, per 10 s ("DrawRunKeyDiag 10s: ..." line):
+//  - a draw whose predecessor left no record (m_run_prev_valid false): the predecessor's reason
+//    (ineligible for one of Inelig's reasons, returned before recording, ...), and whether its key
+//    equalled the predecessor's;
+//  - a draw whose key differs from the record's: which register groups / words differ (KeyPart,
+//    overlapping counts and the most frequent exact combinations), whether the key repeats one of
+//    the last 16 records of the same command buffer, tick and rendering instance (with and without
+//    activity in between), and, once the draw resolved its structure, whether its pipeline and
+//    resolved structure (programs, texture views and layouts, samplers, attachment views) are the
+//    previous record's anyway (a key difference that changed nothing the run reuses);
+//  - every ineligible draw by its first failing condition.
+// The structure key's parts are hashed by the preparing thread only while the switch is on.
+enum KeyPart : uint32_t {
+	KpTargets,     // colour targets but their clear words, and the target mask
+	KpClear,       // colour targets' clear words
+	KpDepth,       // depth target registers
+	KpBlend,       // blend controls, colour control
+	KpBlendColor,  // blend constant
+	KpDepthState,  // depth control, render control/override, count control, depth bounds
+	KpStencil,     // stencil control and masks (reference values)
+	KpClearValues, // depth and stencil clear values
+	KpViewport,    // viewports, scissors, guard bands, clip control
+	KpRaster,      // line width, primitive reset index, scan mode, AA, mode control, poly offset, EQAA
+	KpShRegs,      // shader stages and the context shader registers
+	KpUserConfig,  // user-config registers but the index offset and object id
+	KpVsProgram,   // vertex program (and stage flags)
+	KpPsProgram,   // pixel program
+	KpVsT,         // T# words of the vertex stage
+	KpVsS,         // S# words of the vertex stage
+	KpPsT,         // T# words of the pixel stage
+	KpPsS,         // S# words of the pixel stage
+	KpCount
+};
+using KeyParts = std::array<uint64_t, KpCount>;
+
+[[nodiscard]] bool KeyDiagEnabled();
+// The preparing thread, with the key: one hash per part.
+void StructureKeyParts(const HW::Context& context, const HW::UserConfig& user_config,
+                       const DrawPrep::PreparedDraw& prepared, KeyParts& parts);
+
+namespace KeyDiag {
+// The first failing condition of the record eligibility (renderDraw.cpp), or what left no record.
+enum class Inelig : uint8_t {
+	None,          // recorded
+	NotReached,    // the draw returned before the eligibility check (or no draw yet)
+	NotEngine,     // not an engine commit
+	NotValidated,  // the preparation was not validated
+	NoKey,         // structure key 0 (preparation failed)
+	Mesh,
+	Indirect,
+	VertexStages,  // more than one vertex stage
+	Writes,        // shader writes with KYTY_DRAW_RUN_WRITES off
+	Feedback,      // attachment feedback
+	NoRendering,   // no rendering instance
+	RenderState,   // RenderStateFast(Reset) off
+	DebugDump,
+	DepthClear,
+	StencilClear,
+	ColorClear,
+	Gds,
+	Program,       // program not eligible (BDA/image writes, GDS, fault buffer)
+	TexAttachment, // a texture is an attachment
+	Storage,       // a storage image binding
+	DepthPromotion,// DrawRunRecordDraw: depth promotion excluded
+	Alias,         // DrawRunRecordDraw: a texture over an attachment
+	Count
+};
+// GPU thread.
+void CountIneligible(Inelig reason) noexcept;
+void CountPrevInvalid(Inelig prev, bool same_key) noexcept;
+// A key difference; returns the combination's table index for CountResolved (-1: table full).
+int CountKeyMismatch(uint32_t mask, bool recallable, bool recallable_any_activity) noexcept;
+void CountResolved(int index, bool same_pipeline, bool same_structure) noexcept;
+} // namespace KeyDiag
 
 void CountMiss(Miss miss) noexcept;
 // Verify mode: one comparison, and a difference (counted, logged; exit mode stops).

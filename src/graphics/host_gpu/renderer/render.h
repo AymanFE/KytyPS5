@@ -7,6 +7,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/queueSubmission.h"
 #include "graphics/host_gpu/renderer/commandStream.h"
+#include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorSetReuse.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -1466,6 +1467,34 @@ private:
 	bool          m_run_active         = false; // the draw takes the delta path
 	bool          m_run_verify         = false; // verify mode: the draw would have continued
 	uint64_t      m_run_key            = 0;     // the committed draw's structure key (the engine)
+	// KYTY_DRAW_RUN_KEY_DIAG (drawRun.h): the committed draw's key parts (the engine; null when off)
+	// and the diagnostic's state (GPU thread).
+	const DrawRun::KeyParts* m_run_parts = nullptr;
+	struct DrawRunKeyDiagState {
+		struct Recent {
+			uint64_t          key      = 0;
+			uint64_t          activity = 0;
+			vk::CommandBuffer command  = nullptr;
+			uint64_t          tick     = 0;
+			uint64_t          serial   = 0;
+		};
+		DrawRun::KeyParts               record_parts {}; // m_run's
+		bool                            record_parts_valid = false;
+		uint64_t                        record_pipeline    = 0; // m_run's resolved pipeline
+		uint64_t                        record_structure   = 0; // and structure
+		bool                            record_resolved    = false;
+		uint64_t                        last_key           = 0; // the previous committed draw's
+		DrawRun::KeyDiag::Inelig        reason      = DrawRun::KeyDiag::Inelig::NotReached; // this draw's
+		DrawRun::KeyDiag::Inelig        prev_reason = DrawRun::KeyDiag::Inelig::NotReached;
+		int                             combo       = -2; // this draw's key-difference combination
+		std::array<Recent, 16>          recent {};
+		uint32_t                        recent_next = 0;
+	};
+	DrawRunKeyDiagState m_key_diag;
+	// KYTY_DRAW_RUN_KEY_DIAG: the draw resolved its structure (eligibility check point).
+	void DrawRunKeyDiagResolved(const CommandBuffer& buffer, std::span<PreparedBindings* const> stages,
+	                            const PipelineCache::Pipeline& pipeline, const RenderState& rendering,
+	                            bool recorded);
 	bool          m_in_engine_commit   = false;
 	bool          m_prepared_validated = false; // RefreshShaders accepted the draw's preparation
 	uint32_t      m_run_slice_offset   = 0;

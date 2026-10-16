@@ -908,6 +908,54 @@ public:
 
 	void SetScShaderControl(uint32_t value) { m_sh_regs.m_paScShaderControl = value; }
 
+	// KYTY_DRAW_RUN_KEY_DIAG (drawPrep/drawRun.cpp, diagnostic only): the register groups of the
+	// draw-run structure key, as f(group, data, size). Group numbers are DrawRun::KeyPart values.
+	template <typename F>
+	void VisitKeyDiagParts(F&& f) const {
+		enum : uint32_t { Targets, Clear, Depth, Blend, BlendColor, DepthState, Stencil, ClearValues, Viewport, Raster, ShRegs };
+		for (const auto& rt: m_render_targets) {
+			f(Targets, &rt.base, sizeof(rt.base));
+			f(Targets, &rt.view, sizeof(rt.view));
+			f(Targets, &rt.info, sizeof(rt.info));
+			f(Targets, &rt.attrib, sizeof(rt.attrib));
+			f(Targets, &rt.attrib2, sizeof(rt.attrib2));
+			f(Targets, &rt.attrib3, sizeof(rt.attrib3));
+			f(Targets, &rt.dcc, sizeof(rt.dcc));
+			f(Targets, &rt.cmask, sizeof(rt.cmask));
+			f(Targets, &rt.fmask, sizeof(rt.fmask));
+			f(Targets, &rt.dcc_addr, sizeof(rt.dcc_addr));
+			f(Clear, &rt.clear_word0, sizeof(rt.clear_word0));
+			f(Clear, &rt.clear_word1, sizeof(rt.clear_word1));
+		}
+		f(Targets, &m_render_target_mask, sizeof(m_render_target_mask));
+		f(Depth, &m_depth_render_target, sizeof(m_depth_render_target));
+		f(Blend, m_blend_control, sizeof(m_blend_control));
+		f(Blend, &m_color_control, sizeof(m_color_control));
+		f(BlendColor, &m_blend_color, sizeof(m_blend_color));
+		f(DepthState, &m_depth_control, sizeof(m_depth_control));
+		f(DepthState, &m_render_control, sizeof(m_render_control));
+		f(DepthState, &m_depth_render_override, sizeof(m_depth_render_override));
+		f(DepthState, &m_depth_count_control, sizeof(m_depth_count_control));
+		f(DepthState, &m_depth_bounds_min, sizeof(m_depth_bounds_min));
+		f(DepthState, &m_depth_bounds_max, sizeof(m_depth_bounds_max));
+		f(Stencil, &m_stencil_control, sizeof(m_stencil_control));
+		f(Stencil, &m_stencil_mask, sizeof(m_stencil_mask));
+		f(ClearValues, &m_depth_clear_value, sizeof(m_depth_clear_value));
+		f(ClearValues, &m_stencil_clear_value, sizeof(m_stencil_clear_value));
+		f(Viewport, &m_screen_viewport, sizeof(m_screen_viewport));
+		f(Viewport, &m_clip_control, sizeof(m_clip_control));
+		f(Raster, &m_line_width, sizeof(m_line_width));
+		f(Raster, &m_primitive_reset_index, sizeof(m_primitive_reset_index));
+		f(Raster, &m_scan_mode_control, sizeof(m_scan_mode_control));
+		f(Raster, &m_aa_sample_control, sizeof(m_aa_sample_control));
+		f(Raster, &m_aa_config, sizeof(m_aa_config));
+		f(Raster, &m_mode_control, sizeof(m_mode_control));
+		f(Raster, &m_poly_offset, sizeof(m_poly_offset));
+		f(Raster, &m_eqaa_control, sizeof(m_eqaa_control));
+		f(ShRegs, &m_shader_stages, sizeof(m_shader_stages));
+		f(ShRegs, &m_sh_regs, sizeof(m_sh_regs));
+	}
+
 private:
 	float    m_line_width            = 1.0f;
 	uint32_t m_primitive_reset_index = 0xffffffffu;

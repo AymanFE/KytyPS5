@@ -1525,7 +1525,7 @@ bool GuestGpu::Process(Submission& submission) {
 		SyncEpoch::AdvanceSubmission();
 	}
 	if (DrawRun::Enabled()) {
-		DrawRun::NoteForeignActivity("submission slice");
+		DrawRun::NoteForeignActivity(first_slice ? "submission start" : "submission resume");
 	}
 
 	if (first_slice && submission.reset_processor) {
@@ -1646,7 +1646,7 @@ bool GuestGpu::ProcessSequenced(Submission& submission) {
 	// A new submission, or a slice after other queues ran (syncEpoch.h).
 	SyncEpoch::Advance();
 	if (DrawRun::Enabled()) {
-		DrawRun::NoteForeignActivity("submission slice");
+		DrawRun::NoteForeignActivity(first_slice ? "submission start" : "submission resume");
 	}
 	if (first_slice) {
 		SyncEpoch::AdvanceSubmission();

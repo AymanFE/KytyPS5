@@ -2135,7 +2135,7 @@ static uint32_t AliasedColorSlots(const HW::Context& ctx, uint32_t mask) {
 	}
 	return aliased;
 }
-
+
 // KYTY_MRT_SPLIT accounting: the first splits are logged, then a count every 4096.
 static void NoteMrtSplit(uint32_t slots) {
 	static std::atomic<uint64_t> count {0};
@@ -2259,6 +2259,12 @@ void RenderExecutor::BeginDrawRun() {
 	m_prepared_validated = false;
 	if (!m_in_engine_commit && DrawRun::Enabled()) {
 		DrawRun::NoteForeignActivity("draw outside an engine commit");
+	}
+	if (DrawRun::KeyDiagEnabled()) [[unlikely]] {
+		m_key_diag.prev_reason = m_key_diag.reason;
+		m_key_diag.reason      = m_in_engine_commit ? DrawRun::KeyDiag::Inelig::NotReached
+		                                            : DrawRun::KeyDiag::Inelig::NotEngine;
+		m_key_diag.combo       = -2;
 	}
 }
 
@@ -2471,11 +2477,96 @@ void RenderExecutor::DrawRunMarkBindings() {
 	}
 }
 
+// KYTY_DRAW_RUN_KEY_DIAG: a draw whose key differed from the record's compares its resolved
+// pipeline and structure with the record's; a draw that recorded becomes the record.
+void RenderExecutor::DrawRunKeyDiagResolved(const CommandBuffer& buffer,
+                                            std::span<PreparedBindings* const> stages,
+                                            const PipelineCache::Pipeline&     pipeline,
+                                            const RenderState& rendering, bool recorded) {
+	auto&       kd     = m_key_diag;
+	const auto  handle = static_cast<uint64_t>(
+        reinterpret_cast<uintptr_t>(static_cast<VkPipeline>(pipeline.pipeline)));
+	std::vector<uint64_t> words;
+	words.reserve(64);
+	const auto add_handle = [&words](auto native) {
+		using Native = typename decltype(native)::NativeType;
+		words.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<Native>(native))));
+	};
+	for (const auto* stage: stages) {
+		words.push_back(reinterpret_cast<uintptr_t>(stage->runtime->program));
+		for (const auto& image: stage->images) {
+			add_handle(image.image_view);
+			words.push_back(static_cast<uint64_t>(image.layout));
+			for (const auto view: image.mip_views) {
+				add_handle(view);
+			}
+		}
+		for (const auto sampler: stage->samplers) {
+			add_handle(sampler);
+		}
+		words.push_back(0xffffffffull);
+	}
+	for (uint32_t i = 0; i < rendering.num_color_attachments; i++) {
+		add_handle(rendering.color_attachments[i].image_view);
+		words.push_back(static_cast<uint64_t>(rendering.color_attachments[i].image_layout));
+	}
+	add_handle(rendering.depth_stencil_attachment.image_view);
+	words.push_back(static_cast<uint64_t>(rendering.depth_stencil_attachment.image_layout));
+	const uint64_t structure = XXH3_64bits(words.data(), words.size() * sizeof(uint64_t));
+	if (kd.combo != -2 && kd.record_resolved) {
+		DrawRun::KeyDiag::CountResolved(kd.combo, handle == kd.record_pipeline,
+		                                structure == kd.record_structure);
+	}
+	if (recorded && m_run_parts != nullptr) {
+		kd.record_parts       = *m_run_parts;
+		kd.record_parts_valid = true;
+		kd.record_pipeline    = handle;
+		kd.record_structure   = structure;
+		kd.record_resolved    = true;
+		auto& last = kd.recent[(kd.recent_next + kd.recent.size() - 1) % kd.recent.size()];
+		if (last.key != m_run.key || last.command != m_run.command || last.serial != m_run.rendering_serial) {
+			auto& entry   = kd.recent[kd.recent_next];
+			kd.recent_next = (kd.recent_next + 1) % static_cast<uint32_t>(kd.recent.size());
+			entry         = {m_run.key, m_run.activity, m_run.command, m_run.tick, m_run.rendering_serial};
+		} else {
+			last.activity = m_run.activity;
+			last.tick     = m_run.tick;
+		}
+	} else if (!recorded) {
+		kd.record_parts_valid = false;
+		kd.record_resolved    = false;
+	}
+}
+
 bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRenderState& state,
                                       uint32_t render_target_slice_offset) {
 	using DrawRun::Miss;
 	auto& totals = DrawRun::GetTotals();
 	OwnedCounters::Add(totals.draws, 1);
+	if (m_run_parts != nullptr) [[unlikely]] {
+		// KYTY_DRAW_RUN_KEY_DIAG: why the key check fails.
+		auto& kd = m_key_diag;
+		if (!m_run_prev_valid) {
+			DrawRun::KeyDiag::CountPrevInvalid(kd.prev_reason, m_run_key != 0 && m_run_key == kd.last_key);
+		} else if (m_run_key != 0 && m_run_key != m_run.key && kd.record_parts_valid) {
+			uint32_t mask = 0;
+			for (uint32_t i = 0; i < DrawRun::KpCount; i++) {
+				mask |= (*m_run_parts)[i] != kd.record_parts[i] ? (1u << i) : 0u;
+			}
+			bool recallable = false;
+			bool any        = false;
+			for (const auto& recent: kd.recent) {
+				if (recent.key == m_run_key && recent.command == buffer.Identity() &&
+				    recent.tick == m_context.GetCommandScheduler().CurrentTick() &&
+				    recent.serial != 0 && recent.serial == buffer.ActiveRenderingSerial()) {
+					any        = true;
+					recallable = recallable || recent.activity == DrawRun::ActivityEpoch();
+				}
+			}
+			kd.combo = DrawRun::KeyDiag::CountKeyMismatch(mask, recallable, any);
+		}
+		kd.last_key = m_run_key;
+	}
 	if (!m_run_prev_valid || m_run_key == 0 || m_run_key != m_run.key) {
 		return false;
 	}
@@ -2841,6 +2932,7 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 			    depth->feedback_instance == run.rendering_serial &&
 			    depth->feedback_serial == depth->ContentSerial()) {
 				DrawRun::GetTotals().depth_promotions_excluded.fetch_add(1, std::memory_order_relaxed);
+				m_key_diag.reason = DrawRun::KeyDiag::Inelig::DepthPromotion;
 				return;
 			}
 		}
@@ -2875,6 +2967,7 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 	for (const auto& mark: run.images) {
 		if (mark.texture && DrawRunOverAttachment(attachments, mark.address, mark.size)) {
 			DrawRun::GetTotals().alias_excluded.fetch_add(1, std::memory_order_relaxed);
+			m_key_diag.reason = DrawRun::KeyDiag::Inelig::Alias;
 			return;
 		}
 	}
@@ -4238,6 +4331,59 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				}
 			}
 		}
+		if (DrawRun::KeyDiagEnabled()) [[unlikely]] {
+			using DrawRun::KeyDiag::Inelig;
+			auto reason = Inelig::None;
+			if (!eligible) {
+				bool color_clear = false;
+				for (uint32_t i = 0; i < rendering.num_color_attachments; i++) {
+					color_clear = color_clear || rendering.color_attachments[i].is_clear;
+				}
+				reason = !m_in_engine_commit                                          ? Inelig::NotEngine
+				         : !m_prepared_validated                                      ? Inelig::NotValidated
+				         : m_run_key == 0                                             ? Inelig::NoKey
+				         : mesh_active                                                ? Inelig::Mesh
+				         : (indirect != nullptr && !DrawRun::IndirectRunsEnabled())   ? Inelig::Indirect
+				         : vertex_stages.size() != 1                                  ? Inelig::VertexStages
+				         : (shader_write_stages && !writes_ok)                        ? Inelig::Writes
+				         : feedback_aspects                                           ? Inelig::Feedback
+				         : buffer.ActiveRenderingSerial() == 0                        ? Inelig::NoRendering
+				         : !RenderStateFastEnabled(RenderStatePart::Reset)            ? Inelig::RenderState
+				         : graphics_debug_dump_enabled()                              ? Inelig::DebugDump
+				         : rendering.depth_stencil_attachment.depth_clear             ? Inelig::DepthClear
+				         : rendering.depth_stencil_attachment.stencil_clear           ? Inelig::StencilClear
+				         : color_clear                                                ? Inelig::ColorClear
+				                                                                      : Inelig::Count;
+				if (reason == Inelig::Count) {
+					for (const auto* stage: stages) {
+						if (reason != Inelig::Count) {
+							break;
+						}
+						if (stage->gds.buffer != nullptr) {
+							reason = Inelig::Gds;
+						} else if (!DrawRunProgramEligible(*stage->runtime->program, writes_ok)) {
+							reason = Inelig::Program;
+						} else {
+							for (const auto& binding: stage->images) {
+								if (is_attachment(binding.image_id)) {
+									reason = Inelig::TexAttachment;
+									break;
+								}
+								if (binding.desc.type == TextureCache::BindingType::Storage) {
+									reason = Inelig::Storage;
+									break;
+								}
+							}
+						}
+					}
+					if (reason == Inelig::Count) {
+						reason = Inelig::NotReached; // not found: shown as "notreached"
+					}
+				}
+				DrawRun::KeyDiag::CountIneligible(reason);
+			}
+			m_key_diag.reason = reason;
+		}
 		if (eligible) {
 			OwnedCounters::Add(DrawRun::GetTotals().eligible, 1);
 			const bool program_writes =
@@ -4253,6 +4399,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			if (!continued) {
 				m_run.record_writes_ok = writes_ok;
 			}
+		}
+		if (DrawRun::KeyDiagEnabled()) [[unlikely]] {
+			DrawRunKeyDiagResolved(buffer, stages, pipeline, rendering, eligible && m_run.valid);
 		}
 	}
 	CommitStats::StepMark(CommitStats::Step::RunRecord);
