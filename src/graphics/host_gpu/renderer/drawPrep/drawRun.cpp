@@ -69,6 +69,17 @@ Live::Switch g_cont_eligible("KYTY_DRAW_RUN_CONT_ELIGIBLE", [](const char* value
 	return std::strcmp(value, "exit") == 0 ? 3 : 1;
 });
 
+// KYTY_DRAW_RUN_TARGETS: as KYTY_DRAW_RUN_IMAGE_EPOCH (0, 1, verify 2, exit 3).
+Live::Switch g_targets("KYTY_DRAW_RUN_TARGETS", [](const char* value) -> int64_t {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+});
+
 } // namespace Detail
 
 namespace {
@@ -148,7 +159,10 @@ uint64_t ActivityEpoch() noexcept {
 }
 
 uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_config,
-                      const DrawPrep::PreparedDraw& prepared) {
+                      const DrawPrep::PreparedDraw& prepared, uint64_t* targets_key) {
+	if (targets_key != nullptr) {
+		*targets_key = 0;
+	}
 	if (!prepared.ok || prepared.failure != DrawPrep::Failure::None ||
 	    !prepared.vertex_info.stage.program) {
 		return 0;
@@ -160,6 +174,9 @@ uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_con
 	config.SetIndexOffset(0);
 	config.SetObjectId(0);
 	hash = HashBytes(hash, &config, sizeof(config));
+	if (targets_key != nullptr) {
+		*targets_key = hash != 0 ? hash : 1;
+	}
 	// The programs and the T#/S# words of both stages (V# words, user data and the flattened SRT are
 	// per-draw data).
 	const std::array<const void*, 2> programs {prepared.vertex_info.stage.program,
@@ -436,7 +453,7 @@ void PrintSummary() {
 		return;
 	}
 	static uint64_t                                          last_ns = 0;
-	static std::array<uint64_t, 22>                          last {};
+	static std::array<uint64_t, 24>                          last {};
 	static std::array<uint64_t, static_cast<size_t>(Miss::Count)> last_misses {};
 	// KYTY_CP_OWNED_COUNTERS (ownedCounters.h): the clock is read every 256th call (the line is
 	// due every 10 s; the commit path calls this once per draw).
@@ -452,7 +469,7 @@ void PrintSummary() {
 	if (now - last_ns < 10'000'000'000ull) {
 		return;
 	}
-	const std::array<uint64_t, 22> values {
+	const std::array<uint64_t, 24> values {
 	    g_totals.draws.load(std::memory_order_relaxed),
 	    g_totals.eligible.load(std::memory_order_relaxed),
 	    g_totals.key_matches.load(std::memory_order_relaxed),
@@ -474,8 +491,10 @@ void PrintSummary() {
 	    g_totals.recall_sets_missed.load(std::memory_order_relaxed),
 	    g_totals.epoch_skips.load(std::memory_order_relaxed),
 	    g_totals.epoch_checks.load(std::memory_order_relaxed),
-	    g_totals.epoch_mismatches.load(std::memory_order_relaxed)};
-	std::array<uint64_t, 22> delta {};
+	    g_totals.epoch_mismatches.load(std::memory_order_relaxed),
+	    g_totals.targets_kept.load(std::memory_order_relaxed),
+	    g_totals.targets_late.load(std::memory_order_relaxed)};
+	std::array<uint64_t, 24> delta {};
 	for (size_t i = 0; i < values.size(); i++) {
 		delta[i] = values[i] - last[i];
 	}
@@ -506,14 +525,15 @@ void PrintSummary() {
 	            " dynamic re-emitted, %" PRIu64 " partial pushes, %" PRIu64 " depth-promotions excluded, %" PRIu64
 	            " deferred; writes: %" PRIu64 " records, %" PRIu64 " continued; recall: %" PRIu64
 	            " matches, %" PRIu64 " recalled, %" PRIu64 " sets missed; image epoch: %" PRIu64
-	            " skips, verify %" PRIu64 " checks, %" PRIu64 " mismatches\n",
+	            " skips, verify %" PRIu64 " checks, %" PRIu64 " mismatches; targets: %" PRIu64
+	            " kept, %" PRIu64 " late\n",
 	            static_cast<double>(now - last_ns) * 1e-9,
 	            GetMode() == Mode::Verify ? "verify" : "on", delta[0], delta[1], delta[2], delta[3],
 	            delta[0] != 0 ? 100.0 * static_cast<double>(delta[3]) / static_cast<double>(delta[0])
 	                          : 0.0,
 	            delta[4], misses.empty() ? " none" : misses.c_str(), delta[6], delta[7], delta[8],
 	            delta[9], delta[10], delta[11], delta[12], delta[13], delta[14], delta[15], delta[16],
-	            delta[17], delta[18], delta[19], delta[20], delta[21]);
+	            delta[17], delta[18], delta[19], delta[20], delta[21], delta[22], delta[23]);
 	std::fflush(stdout);
 	if (KeyDiagEnabled()) {
 		PrintKeyDiag(static_cast<double>(now - last_ns) * 1e-9);

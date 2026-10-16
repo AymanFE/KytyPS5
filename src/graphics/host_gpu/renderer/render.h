@@ -1342,6 +1342,7 @@ private:
 	struct DrawRunRecord {
 		bool              valid            = false;
 		uint64_t          key              = 0;
+		uint64_t          targets_key      = 0; // KYTY_DRAW_RUN_TARGETS
 		uint64_t          activity         = 0;
 		vk::CommandBuffer command          = nullptr;
 		uint64_t          tick             = 0;
@@ -1467,6 +1468,11 @@ private:
 	bool          m_run_active         = false; // the draw takes the delta path
 	bool          m_run_verify         = false; // verify mode: the draw would have continued
 	uint64_t      m_run_key            = 0;     // the committed draw's structure key (the engine)
+	uint64_t      m_run_targets_key    = 0;     // and its registers' part (KYTY_DRAW_RUN_TARGETS)
+	bool          m_run_targets_kept   = false; // KYTY_DRAW_RUN_TARGETS: the draw kept the record's
+	// KYTY_DRAW_RUN_TARGETS: whether the committed draw may keep the record's resolved targets.
+	[[nodiscard]] bool DrawRunTargetsCandidate(const CommandBuffer& buffer, const DrawRenderState& state,
+	                                           uint32_t render_target_slice_offset) const;
 	// KYTY_DRAW_RUN_KEY_DIAG (drawRun.h): the committed draw's key parts (the engine; null when off)
 	// and the diagnostic's state (GPU thread).
 	const DrawRun::KeyParts* m_run_parts = nullptr;

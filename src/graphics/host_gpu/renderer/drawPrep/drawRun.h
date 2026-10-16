@@ -79,6 +79,7 @@ extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
+extern Live::Switch g_targets;       // KYTY_DRAW_RUN_TARGETS
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -187,6 +188,27 @@ extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
 	return Detail::g_cont_eligible.Get();
 }
 
+// KYTY_DRAW_RUN_TARGETS (live, default 0; 1 on, verify, exit; with KYTY_DRAW_RUN=1 and
+// KYTY_DRAW_RUN_ACQUIRE, whose records keep their resolved targets): a committed draw that does not
+// continue the run keeps the record's resolved colour and depth targets instead of resolving them
+// again when the resolution's inputs are the record's:
+//  - the targets key (DrawRun::StructureKey's hash of every context register and the user-config
+//    registers but the index offset and object id, i.e. the structure key without the programs
+//    and the T#/S# words) equals the record's, as do the pixel stage's activity and program (its
+//    colour exports select the targets) and the render-target slice offset;
+//  - the run certificate holds as for a continuation: nothing else ran on the command processor
+//    since the record (ActivityEpoch), the same command buffer, tick and rendering instance, and the
+//    record's attachments are unchanged (identity and state, DrawRunImagesUnchanged attachments
+//    only), checked before and again after the draw's buffer work (a change then resolves the
+//    structure late, as a continuation's fallback does).
+// The kept attachments are marked bound as their resolution marks them (BindRenderTarget). At the
+// Sky Garden ~480k draws per 10 s differ from the record only in programs, T# or S# words (same
+// targets). verify: the targets are resolved and compared with the kept ones (DrawRunVerify line);
+// "exit" stops at the first difference.
+[[nodiscard]] inline int64_t TargetsKeepMode() {
+	return Detail::g_targets.Get();
+}
+
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
 // GPU thread; other threads only bump it.
 // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
@@ -218,8 +240,10 @@ void NoteForeignActivity(const char* what = "other") noexcept;
 
 // The structure key of a prepared draw (any thread; the preparing thread in parallel mode). 0 when
 // the preparation failed.
+// targets_key (optional): the hash of the registers alone (KYTY_DRAW_RUN_TARGETS), 0 with the key.
 [[nodiscard]] uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_config,
-                                    const DrawPrep::PreparedDraw& prepared);
+                                    const DrawPrep::PreparedDraw& prepared,
+                                    uint64_t* targets_key = nullptr);
 
 // Why a candidate did not continue its run (after the key matched).
 enum class Miss : uint8_t {
@@ -255,6 +279,8 @@ struct Totals {
 	std::atomic<uint64_t> epoch_skips {0};         // KYTY_DRAW_RUN_IMAGE_EPOCH: checks skipped
 	std::atomic<uint64_t> epoch_checks {0};        // verify: skips checked
 	std::atomic<uint64_t> epoch_mismatches {0};    // verify: a skip would have hidden a change
+	std::atomic<uint64_t> targets_kept {0};        // KYTY_DRAW_RUN_TARGETS (verify: would have)
+	std::atomic<uint64_t> targets_late {0};        // kept, then resolved late (attachments changed)
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};

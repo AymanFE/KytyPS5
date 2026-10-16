@@ -923,6 +923,8 @@ struct Engine::Slot {
 	uint64_t                repeat_packet = 0;
 	// KYTY_DRAW_RUN (drawRun.h): the structure key of the preparation, by the preparing thread.
 	uint64_t run_key = 0;
+	// KYTY_DRAW_RUN_TARGETS: the registers' part of the key (0 when the key is 0).
+	uint64_t run_targets_key = 0;
 	// KYTY_DRAW_RUN_KEY_DIAG: the key's part hashes (only while the switch is on).
 	DrawRun::KeyParts run_parts {};
 	bool              run_parts_valid = false;
@@ -937,9 +939,10 @@ void HashForRepeatTrace(Engine::Slot& slot) {
 		slot.run_key = 0; // not a draw: no run, not in the draw repeat trace
 		return;
 	}
+	slot.run_targets_key = 0;
 	slot.run_key = DrawRun::Enabled() ? DrawRun::StructureKey(slot.registers.context,
 	                                                          slot.registers.user_config,
-	                                                          slot.prepared)
+	                                                          slot.prepared, &slot.run_targets_key)
 	                                  : 0;
 	slot.run_parts_valid = slot.run_key != 0 && DrawRun::KeyDiagEnabled();
 	if (slot.run_parts_valid) [[unlikely]] {
@@ -1571,6 +1574,7 @@ void Engine::ExecuteIndirect(uint64_t position, const std::function<void()>& dra
 	executor.m_binding_plan        = slot.plan.valid ? &slot.plan : nullptr;
 	executor.m_binding_plan_active = false;
 	executor.m_run_key             = commit ? slot.run_key : 0;
+	executor.m_run_targets_key     = commit ? slot.run_targets_key : 0;
 	executor.m_run_parts           = commit && slot.run_parts_valid ? &slot.run_parts : nullptr;
 	executor.m_in_engine_commit    = commit;
 	{
@@ -1581,6 +1585,7 @@ void Engine::ExecuteIndirect(uint64_t position, const std::function<void()>& dra
 	}
 	executor.m_in_engine_commit = false;
 	executor.m_run_key          = 0;
+	executor.m_run_targets_key  = 0;
 	executor.m_run_parts        = nullptr;
 	if (slot.plan.valid) {
 		CountCommittedPlan(executor.m_binding_plan_active);
@@ -1706,6 +1711,7 @@ void Engine::Commit(Slot& slot) {
 	executor.m_binding_plan_active = false;
 	// KYTY_DRAW_RUN (drawRun.h): the draw is an engine commit with this structure key.
 	executor.m_run_key          = slot.run_key;
+	executor.m_run_targets_key  = slot.run_targets_key;
 	executor.m_run_parts        = slot.run_parts_valid ? &slot.run_parts : nullptr;
 	executor.m_in_engine_commit = true;
 	CommitStats::StepMark(CommitStats::Step::BindRegs);
@@ -1717,6 +1723,7 @@ void Engine::Commit(Slot& slot) {
 	}
 	executor.m_in_engine_commit = false;
 	executor.m_run_key          = 0;
+	executor.m_run_targets_key  = 0;
 	executor.m_run_parts        = nullptr;
 	if (slot.plan.valid) {
 		CountCommittedPlan(executor.m_binding_plan_active);

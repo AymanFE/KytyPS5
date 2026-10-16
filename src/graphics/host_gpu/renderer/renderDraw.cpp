@@ -2087,7 +2087,43 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		m_run_verify = true;
 	}
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::ResolveTargets");
-	DrawRunTargets(buffer, draw, render_target_slice_offset, state);
+	// KYTY_DRAW_RUN_TARGETS (drawRun.h): the record's targets, when their inputs are the record's.
+	const auto targets_mode = DrawRun::TargetsKeepMode();
+	const bool keep_targets = targets_mode != 0 && !m_run_verify &&
+	                          DrawRunTargetsCandidate(buffer, state, render_target_slice_offset);
+	if (keep_targets) {
+		OwnedCounters::Add(DrawRun::GetTotals().targets_kept, 1);
+	}
+	if (keep_targets && targets_mode == 1) {
+		const CommitStats::SubScope color_scope(CommitStats::Sub::ColorTargets);
+		state.color_count         = m_run.color_count;
+		state.color_slots_written = m_run.color_slots;
+		for (uint32_t i = 0; i < m_run.color_count; i++) {
+			state.color_info[i] = m_run.colors[i];
+			BindRenderTarget(state.color_info[i].image_id);
+		}
+		state.depth_info = m_run.depth[0];
+		BindRenderTarget(state.depth_info.image_id);
+		m_run_targets_kept = true;
+	} else {
+		DrawRunTargets(buffer, draw, render_target_slice_offset, state);
+		if (keep_targets) {
+			// Verify: the resolution must have given the record's targets.
+			DrawRun::CountVerifyCheck();
+			bool same = state.color_count == m_run.color_count &&
+			            state.color_slots_written == m_run.color_slots &&
+			            SameRenderDepthInfo(state.depth_info, m_run.depth[0]);
+			for (uint32_t i = 0; same && i < state.color_count; i++) {
+				same = SameRenderColorInfo(state.color_info[i], m_run.colors[i]);
+			}
+			if (!same) {
+				DrawRun::ReportMismatch("kept targets");
+				if (targets_mode == 3) {
+					EXIT("DrawRunVerify: kept targets differ from the resolved ones\n");
+				}
+			}
+		}
+	}
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
 		LogFramebufferSkip(draw.Name(), state.color_info[0], state.depth_info, buffer,
@@ -2256,6 +2292,7 @@ void RenderExecutor::BeginDrawRun() {
 	m_run_active         = false;
 	m_run_recall         = false;
 	m_run_verify         = false;
+	m_run_targets_kept   = false;
 	m_prepared_validated = false;
 	if (!m_in_engine_commit && DrawRun::Enabled()) {
 		DrawRun::NoteForeignActivity("draw outside an engine commit");
@@ -2475,6 +2512,21 @@ void RenderExecutor::DrawRunMarkBindings() {
 			image->binding.is_target = true;
 		}
 	}
+}
+
+// KYTY_DRAW_RUN_TARGETS (drawPrep/drawRun.h): the record's targets are what this draw's resolution
+// would give (the same inputs, the run certificate and unchanged attachments).
+bool RenderExecutor::DrawRunTargetsCandidate(const CommandBuffer& buffer, const DrawRenderState& state,
+                                             uint32_t render_target_slice_offset) const {
+	const auto& run   = m_run;
+	const void* pixel = state.ps_active ? state.ps_input_info.stage.program : nullptr;
+	return m_run_prev_valid && !m_run_recall && m_in_engine_commit && run.acquire_valid &&
+	       run.depth.size() == 1 && run.colors.size() == run.color_count &&
+	       m_run_targets_key != 0 && m_run_targets_key == run.targets_key &&
+	       state.ps_active == run.ps_active && pixel == run.pixel_program &&
+	       render_target_slice_offset == run.slice_offset &&
+	       DrawRun::ActivityEpoch() == run.activity && DrawRunCommandUnchanged(buffer) &&
+	       DrawRunImagesUnchanged(true, true);
 }
 
 // KYTY_DRAW_RUN_KEY_DIAG: a draw whose key differed from the record's compares its resolved
@@ -2893,6 +2945,7 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 	}
 	auto& run            = m_run;
 	run.key              = m_run_key;
+	run.targets_key      = m_run_targets_key;
 	run.activity         = DrawRun::ActivityEpoch();
 	run.command          = buffer.Identity();
 	run.tick             = m_context.GetCommandScheduler().CurrentTick();
@@ -3770,11 +3823,21 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// rendering instance (recording one ends rendering, which a continuation never does).
 	const bool run_indirect_barrier =
 	    indirect != nullptr && buffer.ActiveRenderingSerial() != m_indirect_barrier_rendering;
-	if (m_run_active && (!DrawRunCommandUnchanged(buffer) || !DrawRunImagesUnchanged(true) ||
-	                     run_indirect_barrier)) {
+	// KYTY_DRAW_RUN_TARGETS: kept targets whose attachments changed during the buffer work are
+	// resolved now, with the same repeated binding work as a continuation's fallback.
+	const bool targets_late = m_run_targets_kept &&
+	                          (!DrawRunCommandUnchanged(buffer) || !DrawRunImagesUnchanged(true, true));
+	if (targets_late) {
+		m_run_targets_kept = false;
+		OwnedCounters::Add(DrawRun::GetTotals().targets_late, 1);
+	}
+	if (targets_late || (m_run_active && (!DrawRunCommandUnchanged(buffer) || !DrawRunImagesUnchanged(true) ||
+	                                      run_indirect_barrier))) {
 		const CommitStats::SubScope late_scope(CommitStats::Sub::LateFallback);
-		DrawRun::GetTotals().late_fallbacks.fetch_add(1, std::memory_order_relaxed);
-		DrawRun::CountMiss(DrawRun::Miss::Images);
+		if (!targets_late) {
+			DrawRun::GetTotals().late_fallbacks.fetch_add(1, std::memory_order_relaxed);
+			DrawRun::CountMiss(DrawRun::Miss::Images);
+		}
 		m_run_active = false;
 		DrawRunRecallFallback();
 		DrawRunTargets(buffer, draw, m_run_slice_offset, state);
