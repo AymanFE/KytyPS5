@@ -234,7 +234,9 @@ void TestGpuTimestampScale() {
 	Check(S::ParsePercent("100") == 100, "scale: 100");
 	Check(S::ParsePercent("115") == 115, "scale: 115");
 	Check(S::ParsePercent("200") == 200, "scale: 200");
-	Check(S::ParsePercent("99") == S::Off, "scale: below range is off");
+	Check(S::ParsePercent("99") == 99, "scale: 99 (compression)");
+	Check(S::ParsePercent("25") == 25, "scale: 25");
+	Check(S::ParsePercent("24") == S::Off, "scale: below range is off");
 	Check(S::ParsePercent("201") == S::Off, "scale: above range is off");
 	Check(S::ParsePercent("115x") == S::Off, "scale: trailing text is off");
 	Check(S::ParsePercent("-150") == S::Off, "scale: negative is off");
@@ -243,6 +245,8 @@ void TestGpuTimestampScale() {
 	Check(S::Stretch(anchor + 1'000'000, anchor, 100) == anchor + 1'000'000, "scale 100: identity");
 	Check(S::Stretch(anchor + 1'000'000, anchor, 115) == anchor + 1'150'000, "scale 115: 10 ms -> 11.5 ms");
 	Check(S::Stretch(anchor + 1'000'000, anchor, 200) == anchor + 2'000'000, "scale 200: doubled");
+	Check(S::Stretch(anchor + 1'000'000, anchor, 50) == anchor + 500'000, "scale 50: 10 ms -> 5 ms");
+	Check(S::Stretch(anchor + 1'000'000, anchor, 20) == anchor + 1'000'000, "scale 20: invalid, real clock");
 	Check(S::Stretch(anchor + 1'000'000, 0, 150) == anchor + 1'000'000, "no flip yet: real clock");
 	Check(S::Stretch(anchor, anchor, 150) == anchor, "at the flip: real clock");
 	Check(S::Stretch(anchor - 10, anchor, 150) == anchor - 10, "before the anchor: real clock");
