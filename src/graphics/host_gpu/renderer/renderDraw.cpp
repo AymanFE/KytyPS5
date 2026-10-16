@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
 
 #include "common/assert.h"
+#include "common/liveSwitch.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -2106,12 +2107,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 // or bent ahead of Astro). Such a draw (DrawIndex, DrawAuto) runs twice: once without these slots,
 // once with only them, each pass keeping its slots' masks and blends. KYTY_MRT_SPLIT=0 binds them
 // together as before.
+static Live::Switch g_mrt_split("KYTY_MRT_SPLIT", Live::ParseDefaultOn); // live
+
 static bool MrtSplitEnabled() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_MRT_SPLIT");
-		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
-	return enabled;
+	return g_mrt_split.Get() != 0;
 }
 
 static uint32_t AliasedColorSlots(const HW::Context& ctx, uint32_t mask) {
