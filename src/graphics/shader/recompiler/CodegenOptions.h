@@ -78,21 +78,21 @@ struct CodegenOptions {
 	// KYTY_MOVREL_RANGE=0: keep V_MOVRELS/V_MOVRELD select chains over every VGPR above the base
 	// instead of folding the compares that the M0 value set proves false.
 	bool movrel_range = true;
-	// KYTY_MOVREL_KNOWN_ZEROS=1 (default off): with movrel_range, a V_MOVRELS/V_MOVRELD compare of M0
+	// KYTY_MOVREL_KNOWN_ZEROS (default on since claude/u59-gpu; =0 off): with movrel_range, a V_MOVRELS/V_MOVRELD compare of M0
 	// against a register offset that sets a bit M0 never has also folds when M0's value set is
 	// unknown. Known zero bits pass through shifts by constants, masks, sums, products, bit-field
 	// extracts, selects, phis and lane reads: M0 = loop counter << 2 (Astro Bot's foliage vertex
 	// shaders) leaves every fourth register of each chain. Exact.
-	bool movrel_known_zeros = false;
-	// KYTY_MOVREL_SWITCH=1 (default off): a V_MOVRELS select chain of 16 or more links is emitted as
+	bool movrel_known_zeros = true;
+	// KYTY_MOVREL_SWITCH (default on since claude/u59-gpu; =0 off): a V_MOVRELS select chain of 16 or more links is emitted as
 	// an OpSwitch on M0 / 16 whose cases hold the select chains of their 16 index values. M0 is
 	// uniform, so the host runs one short chain instead of a select per register. Exact.
-	bool movrel_switch = false;
-	// KYTY_UNIFORM_LANE_READS=1 (default off): the shuffle result of V_READFIRSTLANE/V_READLANE
+	bool movrel_switch = true;
+	// KYTY_UNIFORM_LANE_READS (default on since claude/u59-gpu; =0 off): the shuffle result of V_READFIRSTLANE/V_READLANE
 	// (every lane already holds the same value) passes through OpGroupNonUniformBroadcastFirst,
 	// which returns it unchanged but lets the host compiler treat it and everything derived from
 	// it (a waterfall loop's key, addresses, loop exits) as uniform. Exact.
-	bool uniform_lane_reads = false;
+	bool uniform_lane_reads = true;
 	// KYTY_SHORT_F32_HELPERS=1 (default off): NaN tests are one OpIsNan instead of exponent and
 	// mantissa tests (float-to-int conversions, the legacy min/max/med3, float atomics). Exact.
 	// (Bryan's companion change, dropping the sin/cos |x| >= 2^23 select, is not exact on the RTX
@@ -127,14 +127,14 @@ struct CodegenOptions {
 	// slower on the RTX 3090 for Astro Bot's heaviest LDS kernel (cs 0x6856320a9c6f89fd: 1.42 -> 2.33 ms).
 	// Device-buffer LDS and GDS keep their branches.
 	bool branchless_lds = false;
-	// KYTY_LANE_LOCAL=1 (default off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
+	// KYTY_LANE_LOCAL (default on since claude/u59-gpu, =0 off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
 	// proven lane-local (Frontend::IsWaveLaneLocal: its lanes' results depend on no lane outside their
 	// 32-lane half) runs one guest lane per host invocation on a host whose compute subgroups are fixed at
 	// 32 lanes (NVIDIA), each subgroup a half wave with its own copy of the scalar state, instead of two
 	// lanes per invocation. Hosts with 64-wide subgroups already run one lane per invocation. A program
 	// the proof accepts only with KYTY_LANE_LOCAL_UNIFORM_LOADS=1 keeps two lanes. KYTY_LANE_LOCAL_LOG=1
 	// prints each verdict.
-	bool lane_local = false;
+	bool lane_local = true;
 	// KYTY_READONLY_BUFFERS=0: leave the storage buffers of a program that never stores to them
 	// (no buffer store or atomic, no coherent load) without NonWritable. With it, the AMD driver
 	// loads a uniform address once per wave into scalar registers instead of once per lane
