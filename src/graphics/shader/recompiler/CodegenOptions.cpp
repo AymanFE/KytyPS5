@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/CodegenOptions.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -32,6 +33,7 @@ CodegenOptions FromEnvironment() {
 	options.lod_stats_gate = EnvFlag("KYTY_LOD_STATS_GATE", options.lod_stats_gate);
 	options.robust_buffer_loads = EnvFlag("KYTY_ROBUST_BUFFER_LOADS", options.robust_buffer_loads);
 	options.branchless_loads    = EnvFlag("KYTY_BRANCHLESS_LOADS", options.branchless_loads);
+	options.lane_local          = EnvFlag("KYTY_LANE_LOCAL", options.lane_local);
 	options.readonly_buffers    = EnvFlag("KYTY_READONLY_BUFFERS", options.readonly_buffers);
 	options.interp_modes = EnvFlag("KYTY_INTERP_MODES", options.interp_modes);
 	options.sample_offsets = EnvFlag("KYTY_SAMPLE_OFFSETS", options.sample_offsets);
@@ -143,6 +145,18 @@ CodegenOptions& Storage() {
 }
 
 } // namespace
+
+namespace {
+std::atomic<bool> g_host_compute_subgroups_32 {false};
+} // namespace
+
+void SetHostComputeSubgroups32(bool fixed_32) {
+	g_host_compute_subgroups_32.store(fixed_32, std::memory_order_relaxed);
+}
+
+bool GetHostComputeSubgroups32() {
+	return g_host_compute_subgroups_32.load(std::memory_order_relaxed);
+}
 
 const CodegenOptions& GetCodegenOptions() {
 	return Storage();

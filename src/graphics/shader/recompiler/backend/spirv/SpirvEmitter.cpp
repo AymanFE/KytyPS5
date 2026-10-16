@@ -608,7 +608,9 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	}
 	EmitterState state(program, input_info);
 	state.mip_stats_records = mip_stats_records;
-	state.lane_count = ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
+	// KYTY_LANE_LOCAL: a proven lane-local wave64 program runs one guest lane per invocation.
+	state.lane_count =
+	    program.lane_local ? 1u : ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
 	state.wave_clusters = state.lane_count == 1 && WaveClustersActive(program);
 	if (state.wave_clusters && program.stage != ShaderType::Compute) {
 		NoteClusteredProgram(program);

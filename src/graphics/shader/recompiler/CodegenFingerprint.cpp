@@ -117,6 +117,10 @@ std::vector<uint8_t> CodegenFingerprint() {
 	if (options.branchless_loads) {
 		b.Text("branchless_loads");
 	}
+	if (options.lane_local) {
+		b.Text("lane_local");
+		b.U8(GetHostComputeSubgroups32() ? 1u : 0u);
+	}
 
 	// Host device state the emitter reads (set once by the device layer).
 	const auto float_controls = Spirv::GetHostFloatControls();

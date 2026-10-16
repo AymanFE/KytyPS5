@@ -1019,7 +1019,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	if (GetCodegenOptions().exec_selects) {
 		// One lane per host invocation: the emitter branches per invocation (see BranchCondition).
 		const bool per_invocation =
-		    ShaderLanesPerInvocation(ir.stage, ir.wave_size, options.input_info) == 1u;
+		    ir.lane_local || ShaderLanesPerInvocation(ir.stage, ir.wave_size, options.input_info) == 1u;
 		(void)IR::EliminateExecSelects(ir, per_invocation);
 	}
 

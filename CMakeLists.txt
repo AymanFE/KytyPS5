@@ -638,6 +638,21 @@ add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 target_link_libraries(scalar_provenance_tests common fmt::fmt xbyak::xbyak)
 target_include_directories(scalar_provenance_tests PRIVATE ${inc_headers})
 
+# KYTY_LANE_LOCAL: the wave64 lane-locality proof on hand-assembled programs (chenxiao07/KytyPS5 9907780e1).
+add_executable(lane_local_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LaneLocalTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ExportOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ImageOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/MemoryOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ScalarAluOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/VectorAluOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/translate/LaneLocal.cpp"
+)
+target_link_libraries(lane_local_tests fmt::fmt)
+target_include_directories(lane_local_tests PRIVATE ${inc_headers})
+
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageManagerTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
@@ -1120,7 +1135,7 @@ target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
-	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
+	foreach(kyty_exception_test scalar_provenance_tests lane_local_tests resource_tracking_tests
 			virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
@@ -1167,6 +1182,7 @@ if(BUILD_TESTING)
 	add_test(NAME registered_shader_code_cert COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-code-cert-only)
 	set_tests_properties(registered_shader_code_cert PROPERTIES ENVIRONMENT "KYTY_REGISTERED_SHADER_CODE=1")
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
+	add_test(NAME lane_local COMMAND $<TARGET_FILE:lane_local_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME texel_image_lookup COMMAND $<TARGET_FILE:texel_image_lookup_tests>)
 	add_test(NAME texture_set_cache COMMAND $<TARGET_FILE:texture_set_cache_tests>)
@@ -2381,6 +2397,7 @@ if(BUILD_TESTING)
 		ime_dialog_tests
 		shader_cfg_tests
 		scalar_provenance_tests
+		lane_local_tests
 		image_page_table_tests
 		image_clear_range_tests
 		image_gpu_keep_tests

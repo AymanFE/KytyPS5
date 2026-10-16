@@ -1089,6 +1089,19 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		                           : "unchanged, the device cannot require 32-wide compute subgroups");
 		std::fflush(stdout);
 	}
+	// KYTY_LANE_LOCAL (CodegenOptions.h): wave64 compute programs run on 32-wide subgroups (no native
+	// wave64), and every such subgroup is exactly 32 lanes: a fixed size of 32 (NVIDIA), or compute
+	// pipelines that require 32 (DeviceCompat::ComputeSubgroupSize).
+	{
+		const bool fixed_32 = subgroup_size_control.minSubgroupSize == 32u &&
+		                      subgroup_size_control.maxSubgroupSize == 32u && properties11.subgroupSize == 32u;
+		const bool required_32 =
+		    graphics.subgroup_size_control_enabled &&
+		    (graphics.required_subgroup_size_stages & vk::ShaderStageFlagBits::eCompute) &&
+		    subgroup_size_control.minSubgroupSize <= 32u && subgroup_size_control.maxSubgroupSize >= 32u;
+		ShaderRecompiler::SetHostComputeSubgroups32(!graphics.compute_subgroup_size_control_enabled &&
+		                                            (fixed_32 || required_32));
+	}
 	{
 		// KYTY_WAVE32_CLUSTERS: the stages whose wave32 programs can share a host subgroup with a
 		// second guest wave (a default size above 32 the pipeline cannot narrow; vertex-like stages

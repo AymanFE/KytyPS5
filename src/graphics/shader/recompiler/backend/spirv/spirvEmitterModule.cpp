@@ -568,6 +568,9 @@ void DefineInputs(EmitterState& state) {
 		    })) {
 			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		}
+	} else if (state.program.lane_local) {
+		// KYTY_LANE_LOCAL: the guest lane of ADD_TID buffers (BufferLane).
+		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 	}
 	for (auto& input: state.inputs) {
 		if (state.program.stage == ShaderType::Pixel &&

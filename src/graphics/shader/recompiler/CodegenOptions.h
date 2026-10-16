@@ -123,6 +123,14 @@ struct CodegenOptions {
 	// branches and phis per access. Device-buffer LDS, GDS, formatted, indirect and BDA loads keep
 	// their branches; so does everything on a device without robustBufferAccess2.
 	bool branchless_loads = false;
+	// KYTY_LANE_LOCAL=1 (default off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
+	// proven lane-local (Frontend::IsWaveLaneLocal: its lanes' results depend on no lane outside their
+	// 32-lane half) runs one guest lane per host invocation on a host whose compute subgroups are fixed at
+	// 32 lanes (NVIDIA), each subgroup a half wave with its own copy of the scalar state, instead of two
+	// lanes per invocation. Hosts with 64-wide subgroups already run one lane per invocation. A program
+	// the proof accepts only with KYTY_LANE_LOCAL_UNIFORM_LOADS=1 keeps two lanes. KYTY_LANE_LOCAL_LOG=1
+	// prints each verdict.
+	bool lane_local = false;
 	// KYTY_READONLY_BUFFERS=0: leave the storage buffers of a program that never stores to them
 	// (no buffer store or atomic, no coherent load) without NonWritable. With it, the AMD driver
 	// loads a uniform address once per wave into scalar registers instead of once per lane
@@ -367,6 +375,11 @@ inline constexpr uint32_t LoopGuardHashGdsFromEnd = RtNodeStatsGdsFromEnd + RtNo
 [[nodiscard]] bool LoopGuardApplies(uint64_t shader_hash);
 
 [[nodiscard]] const CodegenOptions& GetCodegenOptions();
+// KYTY_LANE_LOCAL needs every compute subgroup of a wave64 program to be exactly 32 lanes: a device
+// whose subgroup size is fixed at 32, or one whose compute pipelines require 32 (the device layer sets
+// it once; false until then, which keeps lane-local programs off).
+void               SetHostComputeSubgroups32(bool fixed_32);
+[[nodiscard]] bool GetHostComputeSubgroups32();
 // Test hook: replaces the options for subsequent compilations. Not thread-safe; call it only
 // while no shader is being compiled.
 void SetCodegenOptions(const CodegenOptions& options);
