@@ -117,6 +117,9 @@ std::vector<uint8_t> CodegenFingerprint() {
 	if (options.branchless_loads) {
 		b.Text("branchless_loads");
 	}
+	if (options.branchless_lds) {
+		b.Text("branchless_lds");
+	}
 	if (options.lane_local) {
 		b.Text("lane_local");
 		b.U8(GetHostComputeSubgroups32() ? 1u : 0u);

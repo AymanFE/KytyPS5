@@ -117,12 +117,16 @@ struct CodegenOptions {
 	// a raw dword or subword load of a storage buffer that the device bounds-checks (robust_buffer_loads
 	// on a robustBufferAccess2 device, DeviceChecksDwordLoad) runs in every lane and selects zero where
 	// EXEC is off, instead of branching around it: its address is unchanged, an inactive lane's
-	// out-of-range address reads the device's zero. A workgroup-memory LDS or scratch dword load
-	// selects its element index to 0 (an element every such array has) where EXEC or the bounds rule
-	// it out, then selects zero for the value, instead of two nested branches. Same results; fewer
-	// branches and phis per access. Device-buffer LDS, GDS, formatted, indirect and BDA loads keep
-	// their branches; so does everything on a device without robustBufferAccess2.
+	// out-of-range address reads the device's zero. Same results; fewer branches and phis per access.
+	// Formatted, indirect and BDA loads keep their branches; so does everything on a device without
+	// robustBufferAccess2.
 	bool branchless_loads = false;
+	// KYTY_BRANCHLESS_LDS=1 (default off): with branchless_loads, a workgroup-memory LDS or scratch dword
+	// load also selects its element index to 0 (an element every such array has) where EXEC or the
+	// bounds rule it out, then selects zero for the value, instead of two nested branches. Measured
+	// slower on the RTX 3090 for Astro Bot's heaviest LDS kernel (cs 0x6856320a9c6f89fd: 1.42 -> 2.33 ms).
+	// Device-buffer LDS and GDS keep their branches.
+	bool branchless_lds = false;
 	// KYTY_LANE_LOCAL=1 (default off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
 	// proven lane-local (Frontend::IsWaveLaneLocal: its lanes' results depend on no lane outside their
 	// 32-lane half) runs one guest lane per host invocation on a host whose compute subgroups are fixed at

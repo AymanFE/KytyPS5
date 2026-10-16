@@ -33,6 +33,7 @@ CodegenOptions FromEnvironment() {
 	options.lod_stats_gate = EnvFlag("KYTY_LOD_STATS_GATE", options.lod_stats_gate);
 	options.robust_buffer_loads = EnvFlag("KYTY_ROBUST_BUFFER_LOADS", options.robust_buffer_loads);
 	options.branchless_loads    = EnvFlag("KYTY_BRANCHLESS_LOADS", options.branchless_loads);
+	options.branchless_lds      = EnvFlag("KYTY_BRANCHLESS_LDS", options.branchless_lds);
 	options.lane_local          = EnvFlag("KYTY_LANE_LOCAL", options.lane_local);
 	options.readonly_buffers    = EnvFlag("KYTY_READONLY_BUFFERS", options.readonly_buffers);
 	options.interp_modes = EnvFlag("KYTY_INTERP_MODES", options.interp_modes);

@@ -348,11 +348,15 @@ BranchlessLoad BranchlessLoadKind(EmitterState& state, const IR::MemoryInfo& mem
 			           ? BranchlessLoad::Device
 			           : BranchlessLoad::None;
 		case IR::ResourceKind::Lds:
-			return state.lds_storage_class != spv::StorageClassStorageBuffer && LdsDwordCount(state) != 0u
+			return GetCodegenOptions().branchless_lds &&
+			               state.lds_storage_class != spv::StorageClassStorageBuffer &&
+			               LdsDwordCount(state) != 0u
 			           ? BranchlessLoad::SafeIndex
 			           : BranchlessLoad::None;
 		case IR::ResourceKind::Scratch:
-			return state.program.scratch_dwords != 0u ? BranchlessLoad::SafeIndex : BranchlessLoad::None;
+			return GetCodegenOptions().branchless_lds && state.program.scratch_dwords != 0u
+			           ? BranchlessLoad::SafeIndex
+			           : BranchlessLoad::None;
 		default: return BranchlessLoad::None;
 	}
 }
