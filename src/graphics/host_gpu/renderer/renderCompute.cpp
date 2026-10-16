@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/liveSwitch.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -27,6 +28,7 @@
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
+#include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
@@ -49,11 +51,12 @@
 namespace Libs::Graphics {
 // KYTY_DISPATCH_OVERLAP accounting, printed every 10 s once a direct dispatch ran:
 //   DispatchOverlap 10s (on|off): <direct> direct dispatches, <pairs> unordered pairs (<pct>%),
-//   <overlapped> overlapped, <indirect> indirect
+//   <overlapped> overlapped, <indirect> indirect (<empty> empty skipped, KYTY_SKIP_EMPTY_INDIRECT)
 // An unordered pair is a direct dispatch that followed another with nothing in between (it would
 // overlap with the switch on); counted with the switch off too, for sizing.
 static std::atomic<uint64_t> g_overlap_direct {0}, g_overlap_pairs {0}, g_overlap_taken {0},
-    g_overlap_indirect {0};
+    g_overlap_indirect {0}, g_overlap_empty_indirect {0};
+static Live::Switch g_skip_empty_indirect("KYTY_SKIP_EMPTY_INDIRECT", Live::ParseDefaultOn);
 static std::atomic<int64_t> g_overlap_last_print_ns {0};
 
 static void PrintDispatchOverlap(bool enabled) {
@@ -73,12 +76,14 @@ static void PrintDispatchOverlap(bool enabled) {
 	const auto pairs    = g_overlap_pairs.exchange(0, std::memory_order_relaxed);
 	const auto taken    = g_overlap_taken.exchange(0, std::memory_order_relaxed);
 	const auto indirect = g_overlap_indirect.exchange(0, std::memory_order_relaxed);
+	const auto empty    = g_overlap_empty_indirect.exchange(0, std::memory_order_relaxed);
 	std::printf("DispatchOverlap 10s (%s): %llu direct dispatches, %llu unordered pairs (%.1f%%), "
-	            "%llu overlapped, %llu indirect\n",
+	            "%llu overlapped, %llu indirect (%llu empty skipped)\n",
 	            enabled ? "on" : "off", static_cast<unsigned long long>(direct),
 	            static_cast<unsigned long long>(pairs),
 	            direct != 0 ? 100.0 * static_cast<double>(pairs) / static_cast<double>(direct) : 0.0,
-	            static_cast<unsigned long long>(taken), static_cast<unsigned long long>(indirect));
+	            static_cast<unsigned long long>(taken), static_cast<unsigned long long>(indirect),
+	            static_cast<unsigned long long>(empty));
 }
 
 static void CountDispatchOverlap(bool unordered, bool enabled) {
@@ -699,6 +704,17 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	ShaderProgram compute_program;
 	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): as in DispatchDirect, from no workgroup counts.
 	auto* const prepared = std::exchange(m_prepared_dispatch, nullptr);
+	// KYTY_SKIP_EMPTY_INDIRECT (live, default on; upstream be5915c24): arguments no GPU write is
+	// pending for, read from guest memory, with a zero group count: the dispatch does nothing.
+	if (g_skip_empty_indirect.Get() != 0) {
+		vk::DispatchIndirectCommand args {};
+		if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+		    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
+		    (args.x == 0 || args.y == 0 || args.z == 0)) {
+			g_overlap_empty_indirect.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
 	if (prepared != nullptr && !async_compute && DrawPrep::ValidateDispatch(*prepared, input_info)) {
 		if (DrawPrep::VerifyMode() != 0) {
 			auto serial_prep = std::make_unique<PipelineCache::StagePrep>();
