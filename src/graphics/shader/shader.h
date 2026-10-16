@@ -214,7 +214,11 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_pos_y                     = false;
 	bool                                           ps_pos_z                     = false;
 	bool                                           ps_pos_w                     = false;
-	bool                                           ps_front_face                = false;
+	// One byte, as ps_front_face alone was: journals and pipeline lists keep their layout (stored
+	// values 0/1 read as all-bits off). all_bits: SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS selects
+	// uint masks instead of float +/-1.
+	bool                                           ps_front_face          : 1  = false;
+	bool                                           ps_front_face_all_bits : 1  = false;
 	bool                                           ps_ancillary                 = false;
 	bool                                           ps_no_perspective            = false;
 	bool                                           ps_pixel_kill_enable         = false;

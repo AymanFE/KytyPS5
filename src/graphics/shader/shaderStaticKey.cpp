@@ -96,7 +96,9 @@ void BuildStageStaticKey(const ShaderPixelInputInfo& info, std::vector<uint32_t>
 	key.push_back(static_cast<uint32_t>(info.ps_pos_y));
 	key.push_back(static_cast<uint32_t>(info.ps_pos_z));
 	key.push_back(static_cast<uint32_t>(info.ps_pos_w));
-	key.push_back(static_cast<uint32_t>(info.ps_front_face));
+	// Bit 1: FRONT_FACE_ALL_BITS (0, float +/-1, keeps older keys).
+	key.push_back(static_cast<uint32_t>(info.ps_front_face) |
+	              (static_cast<uint32_t>(info.ps_front_face_all_bits) << 1u));
 	key.push_back(static_cast<uint32_t>(info.ps_ancillary));
 	// Bits 8+: the provoking-vertex mode of flat parameters (0, first vertex, keeps older keys).
 	key.push_back(static_cast<uint32_t>(info.ps_no_perspective) |
