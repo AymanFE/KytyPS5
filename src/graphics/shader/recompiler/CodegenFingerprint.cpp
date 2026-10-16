@@ -113,6 +113,10 @@ std::vector<uint8_t> CodegenFingerprint() {
 	b.U32(options.lds_limit_override);
 	b.U8(options.ps_per_vertex ? 1u : 0u);
 	b.U8(options.clip_guard ? 1u : 0u);
+	// Switches added since: only when on, so caches made with them off stay valid.
+	if (options.branchless_loads) {
+		b.Text("branchless_loads");
+	}
 
 	// Host device state the emitter reads (set once by the device layer).
 	const auto float_controls = Spirv::GetHostFloatControls();

@@ -113,6 +113,16 @@ struct CodegenOptions {
 	// KYTY_ROBUST_BUFFER_LOADS=0: bounds-check every plain dword storage-buffer load in the shader
 	// even when the device's robustBufferAccess2 already returns zero for out-of-range dwords.
 	bool robust_buffer_loads = true;
+	// KYTY_BRANCHLESS_LOADS=1 (default off; YOTEI 434138316 / 01714a120 / 76a51a908, bruno 6ddeb3388):
+	// a raw dword or subword load of a storage buffer that the device bounds-checks (robust_buffer_loads
+	// on a robustBufferAccess2 device, DeviceChecksDwordLoad) runs in every lane and selects zero where
+	// EXEC is off, instead of branching around it: its address is unchanged, an inactive lane's
+	// out-of-range address reads the device's zero. A workgroup-memory LDS or scratch dword load
+	// selects its element index to 0 (an element every such array has) where EXEC or the bounds rule
+	// it out, then selects zero for the value, instead of two nested branches. Same results; fewer
+	// branches and phis per access. Device-buffer LDS, GDS, formatted, indirect and BDA loads keep
+	// their branches; so does everything on a device without robustBufferAccess2.
+	bool branchless_loads = false;
 	// KYTY_READONLY_BUFFERS=0: leave the storage buffers of a program that never stores to them
 	// (no buffer store or atomic, no coherent load) without NonWritable. With it, the AMD driver
 	// loads a uniform address once per wave into scalar registers instead of once per lane

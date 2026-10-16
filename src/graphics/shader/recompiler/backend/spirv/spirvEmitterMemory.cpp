@@ -327,7 +327,67 @@ uint32_t LoadWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 	    [&]() { return LoadWordInBounds(ctx, resource, index); });
 }
 
+// KYTY_BRANCHLESS_LOADS (CodegenOptions::branchless_loads): how a raw load of mem may run in every
+// lane. Device: a storage buffer the device bounds-checks (the address stays, an inactive lane's
+// out-of-range address reads zero). SafeIndex: workgroup or invocation LDS and scratch, where a lane
+// that EXEC or the bounds rule out reads element 0 instead. None: keep the branches.
+enum class BranchlessLoad : uint8_t { None, Device, SafeIndex };
+
+BranchlessLoad BranchlessLoadKind(EmitterState& state, const IR::MemoryInfo& mem) {
+	if (!GetCodegenOptions().branchless_loads) {
+		return BranchlessLoad::None;
+	}
+	switch (mem.kind) {
+		case IR::ResourceKind::Buffer:
+		case IR::ResourceKind::ScalarBuffer:
+			return GetCodegenOptions().robust_buffer_loads &&
+			               GetHostBufferRobustness().storage_dword_loads_return_zero
+			           ? BranchlessLoad::Device
+			           : BranchlessLoad::None;
+		case IR::ResourceKind::Lds:
+			return state.lds_storage_class != spv::StorageClassStorageBuffer && LdsDwordCount(state) != 0u
+			           ? BranchlessLoad::SafeIndex
+			           : BranchlessLoad::None;
+		case IR::ResourceKind::Scratch:
+			return state.program.scratch_dwords != 0u ? BranchlessLoad::SafeIndex : BranchlessLoad::None;
+		default: return BranchlessLoad::None;
+	}
+}
+
+// The element index a SafeIndex load reads, and whether its lane may use the value (usable).
+uint32_t SafeElementIndex(EmitterState& state, const MemoryResourceAccess& resource, uint32_t index,
+                          uint32_t active, uint32_t& usable) {
+	usable = AndCondition(state, active, EmitMemoryElementInBounds(state, resource, index));
+	return Select(state, TypeU32(state), usable, index, ConstantU32(state, 0));
+}
+
+uint32_t ZeroUnless(EmitterState& state, uint32_t condition, uint32_t value) {
+	return Select(state, TypeU32(state), condition, value, ConstantU32(state, 0));
+}
+
+// A raw dword load of mem without branches, or 0 when it keeps them.
+uint32_t LoadWordBranchless(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                            uint32_t active) {
+	auto&      state = ctx.state;
+	const auto kind  = BranchlessLoadKind(state, mem);
+	if (kind == BranchlessLoad::None) {
+		return 0;
+	}
+	const auto resource = PrepareMemoryResourceAccess(state, mem);
+	const auto index    = DwordIndex(ctx, inst, mem);
+	if (kind == BranchlessLoad::Device) {
+		return ZeroUnless(state, active, LoadWordInBounds(ctx, resource, index));
+	}
+	uint32_t   usable = 0;
+	const auto safe   = SafeElementIndex(state, resource, index, active, usable);
+	return ZeroUnless(state, usable, LoadWordInBounds(ctx, resource, safe));
+}
+
 uint32_t LoadWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) {
+	if (const auto value = LoadWordBranchless(ctx, inst, mem, ctx.Arg(inst, inst.NumArgs() - 1));
+	    value != 0) {
+		return value;
+	}
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
 		return LoadWordPrepared(ctx, inst, mem, resource);
@@ -387,6 +447,24 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 
 uint32_t LoadSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem, uint32_t bits,
                      bool sign_extend) {
+	// KYTY_BRANCHLESS_LOADS: as LoadWordBranchless.
+	if (const auto kind = BranchlessLoadKind(ctx.state, mem); kind != BranchlessLoad::None) {
+		auto&      state    = ctx.state;
+		const auto active   = ctx.Arg(inst, inst.NumArgs() - 1);
+		const auto resource = PrepareMemoryResourceAccess(state, mem);
+		const auto address  = ByteAddress(ctx, inst, mem);
+		const auto index =
+		    Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
+		           ConstantU32(state, std::countr_zero(resource.element_bits / 8u)));
+		if (kind == BranchlessLoad::Device) {
+			return ZeroUnless(state, active,
+			                  LoadSubwordInBounds(ctx, resource, address, index, bits, sign_extend));
+		}
+		uint32_t   usable = 0;
+		const auto safe   = SafeElementIndex(state, resource, index, active, usable);
+		return ZeroUnless(state, usable,
+		                  LoadSubwordInBounds(ctx, resource, address, safe, bits, sign_extend));
+	}
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
 		return LoadSubwordPrepared(ctx, inst, mem, resource, bits, sign_extend);
@@ -1318,6 +1396,19 @@ uint32_t LoadIndirectFormattedX(ValueEmitContext& ctx, const IR::Inst& inst) {
 
 uint32_t LoadWideBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
+	// KYTY_BRANCHLESS_LOADS: raw dwords of a device-checked storage buffer, each selected by EXEC.
+	if (const auto& mem = ctx.Memory(inst);
+	    mem.kind != IR::ResourceKind::IndirectBuffer && !mem.formatted &&
+	    BranchlessLoadKind(state, mem) == BranchlessLoad::Device) {
+		const auto              active   = ctx.Arg(inst, inst.NumArgs() - 1);
+		const auto              resource = PrepareMemoryResourceAccess(state, mem);
+		std::array<uint32_t, 4> values {};
+		for (uint32_t component = 0; component < components; component++) {
+			const auto index  = DwordIndex(ctx, inst, RebaseRawComponent(mem, component));
+			values[component] = ZeroUnless(state, active, LoadWordInBounds(ctx, resource, index));
+		}
+		return ConstructU32Composite(state, components, values);
+	}
 	return EmitValueOrDefaultIfCondition(
 	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
 	    ConstantU32CompositeZero(state, components), [&]() {
@@ -1372,6 +1463,24 @@ void StoreWideBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 
 uint32_t LoadWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
+	// KYTY_BRANCHLESS_LOADS: each dword reads element 0 where EXEC or its bounds rule it out.
+	if (const auto& mem = ctx.Memory(inst); BranchlessLoadKind(state, mem) == BranchlessLoad::SafeIndex) {
+		const auto              active   = ctx.Arg(inst, inst.NumArgs() - 1);
+		const auto              resource = PrepareMemoryResourceAccess(state, mem);
+		const auto              base     = ByteAddress(ctx, inst, mem);
+		std::array<uint32_t, 4> values {};
+		for (uint32_t component = 0; component < components; component++) {
+			const auto address = component == 0u ? base
+			                                     : Binary(state, spv::OpIAdd, TypeU32(state), base,
+			                                              ConstantU32(state, component * 4u));
+			const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
+			                          ConstantU32(state, 2));
+			uint32_t   usable = 0;
+			const auto safe   = SafeElementIndex(state, resource, index, active, usable);
+			values[component] = ZeroUnless(state, usable, LoadWordInBounds(ctx, resource, safe));
+		}
+		return ConstructU32Composite(state, components, values);
+	}
 	return EmitValueOrDefaultIfCondition(
 	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
 	    ConstantU32CompositeZero(state, components), [&]() {
