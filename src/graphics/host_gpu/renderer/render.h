@@ -1343,6 +1343,7 @@ private:
 		bool              valid            = false;
 		uint64_t          key              = 0;
 		uint64_t          targets_key      = 0; // KYTY_DRAW_RUN_TARGETS
+		uint64_t          swap_key         = 0; // KYTY_DRAW_RUN_PIPESWAP
 		uint64_t          activity         = 0;
 		vk::CommandBuffer command          = nullptr;
 		uint64_t          tick             = 0;
@@ -1469,6 +1470,12 @@ private:
 	bool          m_run_verify         = false; // verify mode: the draw would have continued
 	uint64_t      m_run_key            = 0;     // the committed draw's structure key (the engine)
 	uint64_t      m_run_targets_key    = 0;     // and its registers' part (KYTY_DRAW_RUN_TARGETS)
+	uint64_t      m_run_swap_key       = 0;     // and the key without the vertex program (PIPESWAP)
+	bool          m_run_pipeswap       = false; // KYTY_DRAW_RUN_PIPESWAP: the continuation swaps
+	// KYTY_DRAW_RUN_PIPESWAP: the kept vertex-stage bindings and claims fit the new vertex program.
+	[[nodiscard]] static bool DrawRunPipeSwapCompatible(
+	    const ShaderRecompiler::IR::CompiledShaderInfo& recorded,
+	    const ShaderRecompiler::IR::CompiledShaderInfo& program);
 	bool          m_run_targets_kept   = false; // KYTY_DRAW_RUN_TARGETS: the draw kept the record's
 	// KYTY_DRAW_RUN_TARGETS: whether the committed draw may keep the record's resolved targets.
 	[[nodiscard]] bool DrawRunTargetsCandidate(const CommandBuffer& buffer, const DrawRenderState& state,

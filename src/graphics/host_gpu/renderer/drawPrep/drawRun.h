@@ -80,6 +80,7 @@ extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
 extern Live::Switch g_targets;       // KYTY_DRAW_RUN_TARGETS
+extern Live::Switch g_pipeswap;      // KYTY_DRAW_RUN_PIPESWAP
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -209,6 +210,30 @@ extern Live::Switch g_targets;       // KYTY_DRAW_RUN_TARGETS
 	return Detail::g_targets.Get();
 }
 
+// KYTY_DRAW_RUN_PIPESWAP (live, default 0; 1 on; with KYTY_DRAW_RUN=1 or verify): a draw whose
+// structure key differs from the record's only in the vertex program continues the run with a
+// pipeline swap. At the Sky Garden ~150k draws per 10 s differ from the record in the vertex
+// program alone (same registers, pixel program, T# and S# words).
+//  - the swap key (the structure key with the vertex program left out, DrawRun::StructureKey) equals
+//    the record's; the stage flags, pixel program and slice offset are the record's;
+//  - the two vertex programs declare the same images and samplers (every field of their
+//    descriptions but the user-data source and first use), so the kept vertex-stage texture and
+//    sampler bindings, resolved from the same words, are what the new program's resolution gives;
+//  - both or neither export a viewport index (the scissor union the attachments were claimed for);
+//  - the new vertex program is run-eligible (no address or image writes, GDS or fault buffer); its
+//    buffer writes, when KYTY_DRAW_RUN_WRITES allows them, must not lie over an image of the run;
+//  - the rest of the certificate is a continuation's (activity, command buffer, tick, instance,
+//    validation, images unchanged after the buffer work).
+// It then keeps the targets, textures, samplers, views, acquisition and transitions like a
+// continuation, and like any draw looks up its pipeline (the binding plan's), pushes all its
+// descriptors (no partial push) and records its dynamic state again. Its record eligibility is
+// computed in full (not taken from the record, KYTY_DRAW_RUN_CONT_ELIGIBLE), and the record takes
+// the new vertex program and pipeline layout. Verify mode (KYTY_DRAW_RUN=verify) compares a would-be
+// swap's normal path with the record as for any continuation.
+[[nodiscard]] inline bool PipeSwapEnabled() {
+	return Detail::g_pipeswap.On();
+}
+
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
 // GPU thread; other threads only bump it.
 // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
@@ -240,10 +265,11 @@ void NoteForeignActivity(const char* what = "other") noexcept;
 
 // The structure key of a prepared draw (any thread; the preparing thread in parallel mode). 0 when
 // the preparation failed.
-// targets_key (optional): the hash of the registers alone (KYTY_DRAW_RUN_TARGETS), 0 with the key.
+// targets_key (optional): the hash of the registers alone (KYTY_DRAW_RUN_TARGETS); swap_key
+// (optional): the key without the vertex program (KYTY_DRAW_RUN_PIPESWAP); 0 with the key.
 [[nodiscard]] uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_config,
                                     const DrawPrep::PreparedDraw& prepared,
-                                    uint64_t* targets_key = nullptr);
+                                    uint64_t* targets_key = nullptr, uint64_t* swap_key = nullptr);
 
 // Why a candidate did not continue its run (after the key matched).
 enum class Miss : uint8_t {
@@ -281,6 +307,9 @@ struct Totals {
 	std::atomic<uint64_t> epoch_mismatches {0};    // verify: a skip would have hidden a change
 	std::atomic<uint64_t> targets_kept {0};        // KYTY_DRAW_RUN_TARGETS (verify: would have)
 	std::atomic<uint64_t> targets_late {0};        // kept, then resolved late (attachments changed)
+	std::atomic<uint64_t> swap_matches {0};        // KYTY_DRAW_RUN_PIPESWAP: the swap key matched
+	std::atomic<uint64_t> swapped {0};             // continued with a pipeline swap (verify: would have)
+	std::atomic<uint64_t> swap_incompatible {0};   // vertex programs' bindings or outputs differ
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};

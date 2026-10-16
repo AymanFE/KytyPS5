@@ -2299,6 +2299,7 @@ void RenderExecutor::BeginDrawRun() {
 	m_run_recall         = false;
 	m_run_verify         = false;
 	m_run_targets_kept   = false;
+	m_run_pipeswap       = false;
 	m_prepared_validated = false;
 	if (!m_in_engine_commit && DrawRun::Enabled()) {
 		DrawRun::NoteForeignActivity("draw outside an engine commit");
@@ -2625,10 +2626,18 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 		}
 		kd.last_key = m_run_key;
 	}
+	bool pipeswap = false;
 	if (!m_run_prev_valid || m_run_key == 0 || m_run_key != m_run.key) {
-		return false;
+		// KYTY_DRAW_RUN_PIPESWAP: the key differs in the vertex program alone.
+		if (!m_run_prev_valid || m_run_key == 0 || m_run_swap_key == 0 ||
+		    m_run_swap_key != m_run.swap_key || !DrawRun::PipeSwapEnabled()) {
+			return false;
+		}
+		pipeswap = true;
+		OwnedCounters::Add(totals.swap_matches, 1);
+	} else {
+		OwnedCounters::Add(totals.key_matches, 1);
 	}
-	OwnedCounters::Add(totals.key_matches, 1);
 	if (DrawRun::ActivityEpoch() != m_run.activity) {
 		DrawRun::CountMiss(Miss::Activity);
 		return false;
@@ -2649,10 +2658,33 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 	}
 	const void* pixel = state.ps_active ? state.ps_input_info.stage.program : nullptr;
 	if (state.ps_active != m_run.ps_active || render_target_slice_offset != m_run.slice_offset ||
-	    state.vertex_stages_written != 1 || state.vertex_info[0].stage.program != m_run.vertex_program ||
+	    state.vertex_stages_written != 1 ||
+	    (!pipeswap && state.vertex_info[0].stage.program != m_run.vertex_program) ||
 	    pixel != m_run.pixel_program) {
 		DrawRun::CountMiss(Miss::Programs);
 		return false;
+	}
+	bool swap_writes = false;
+	if (pipeswap) {
+		const auto* recorded = static_cast<const ShaderRecompiler::IR::CompiledShaderInfo*>(
+		    m_run.vertex_program);
+		const auto& program = *state.vertex_info[0].stage.program;
+		if (recorded == nullptr || recorded == &program || !DrawRunPipeSwapCompatible(*recorded, program)) {
+			OwnedCounters::Add(totals.swap_incompatible, 1);
+			return false;
+		}
+		// The new vertex program: run-eligible, and its buffer writes (if allowed) off the run's images.
+		if (!DrawRunProgramEligible(program)) {
+			if (!m_run.record_writes_ok || !DrawRunProgramEligible(program, true)) {
+				DrawRun::CountMiss(Miss::Writes);
+				return false;
+			}
+			switch (DrawRunWritesOverRun(state.vertex_info[0].stage, m_run.images)) {
+				case 0: break;
+				case 1: swap_writes = true; break;
+				default: DrawRun::CountMiss(Miss::Writes); return false;
+			}
+		}
 	}
 	// KYTY_DRAW_RUN_WRITES: a record of a writing program exists only while the switch is on (a
 	// change ends the run). The candidate's own writes must not lie over an image of the run.
@@ -2672,10 +2704,47 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 		}
 	}
 	OwnedCounters::Add(totals.continued, 1);
-	if (writes) {
+	if (writes || swap_writes) {
 		OwnedCounters::Add(totals.write_continued, 1);
 	}
+	if (pipeswap) {
+		OwnedCounters::Add(totals.swapped, 1);
+		m_run_pipeswap = true;
+	}
 	return true;
+}
+
+bool RenderExecutor::DrawRunPipeSwapCompatible(const ShaderRecompiler::IR::CompiledShaderInfo& recorded,
+                                               const ShaderRecompiler::IR::CompiledShaderInfo& program) {
+	const auto& a = recorded.info;
+	const auto& b = program.info;
+	if (a.images.size() != b.images.size() || a.samplers.size() != b.samplers.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < a.images.size(); i++) {
+		auto x = a.images[i];
+		auto y = b.images[i];
+		x.source = y.source = 0;
+		x.first_use_pc = y.first_use_pc = 0;
+		if (!(x == y)) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < a.samplers.size(); i++) {
+		auto x = a.samplers[i];
+		auto y = b.samplers[i];
+		x.source = y.source = 0;
+		x.first_use_pc = y.first_use_pc = 0;
+		if (!(x == y)) {
+			return false;
+		}
+	}
+	const auto viewport_index = [](const auto& outputs) {
+		return std::any_of(outputs.begin(), outputs.end(), [](const auto& output) {
+			return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
+		});
+	};
+	return viewport_index(a.outputs) == viewport_index(b.outputs);
 }
 
 // KYTY_DRAW_RUN_RECALL: a hash of a binding's mip views (RecallTexture::mips).
@@ -2933,7 +3002,8 @@ bool RenderExecutor::DrawRunAcquireCandidate(const CommandBuffer&               
 
 bool RenderExecutor::DrawRunPartialPush(const CommandBuffer&           buffer,
                                         const PipelineCache::Pipeline& pipeline) const {
-	return DrawRun::PushPartialEnabled() && !m_run_recall && pipeline.uses_push_descriptors &&
+	return DrawRun::PushPartialEnabled() && !m_run_recall && !m_run_pipeswap &&
+	       pipeline.uses_push_descriptors &&
 	       m_run.push_valid &&
 	       m_run.push_layout == pipeline.pipeline_layout &&
 	       buffer.DescriptorEpoch(vk::PipelineBindPoint::eGraphics) == m_run.push_epoch;
@@ -2952,6 +3022,7 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 	auto& run            = m_run;
 	run.key              = m_run_key;
 	run.targets_key      = m_run_targets_key;
+	run.swap_key         = m_run_swap_key;
 	run.activity         = DrawRun::ActivityEpoch();
 	run.command          = buffer.Identity();
 	run.tick             = m_context.GetCommandScheduler().CurrentTick();
@@ -2959,7 +3030,13 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 	// The draw's push (whole or partial) is the last descriptor command at the bind point.
 	run.push_epoch = buffer.DescriptorEpoch(vk::PipelineBindPoint::eGraphics);
 	if (m_run_active) {
-		// A continuation changed none of the recorded images, targets or bindings.
+		// A continuation changed none of the recorded images, targets or bindings; a pipeline swap
+		// changed the vertex program and the pipeline (layout) the next draw is compared with.
+		if (m_run_pipeswap) {
+			run.vertex_program = state.vertex_info[0].stage.program;
+			run.push_valid     = pipeline.uses_push_descriptors;
+			run.push_layout    = pipeline.pipeline_layout;
+		}
 		run.valid = true;
 		return;
 	}
@@ -4094,7 +4171,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// vertex program as the previous draw's, which recorded it into this command buffer; the
 	// shadow shows nothing replaced it since (another pipeline bind or command buffer).
 	// A recall records it again: the draws in between left their own.
-	const bool run_dynamic = (m_run_active || m_run_verify) && !m_run_recall &&
+	const bool run_dynamic = (m_run_active || m_run_verify) && !m_run_recall && !m_run_pipeswap &&
 	                         DynamicStateShadowEnabled() &&
 	                         m_dynamic_state.valid && m_dynamic_state.command == vk_buffer.Identity() &&
 	                         m_dynamic_state.pipeline != nullptr &&
@@ -4367,7 +4444,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		// KYTY_DRAW_RUN_CONT_ELIGIBLE (drawRun.h): a continuation's per-stage part is its record's.
 		const auto cont_mode  = DrawRun::ContEligibleMode();
-		const bool cont_known = cont_mode != 0 && m_run_active && m_run.record_writes_ok == writes_ok;
+		const bool cont_known = cont_mode != 0 && m_run_active && !m_run_pipeswap &&
+		                        m_run.record_writes_ok == writes_ok;
 		const auto stages_eligible = [&] {
 			bool ok = true;
 			for (const auto* stage: stages) {

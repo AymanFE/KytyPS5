@@ -1781,6 +1781,15 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
 	set_tests_properties(draw_run_parallel_bindings_targets PROPERTIES
 		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_TARGETS=1")
+	# KYTY_DRAW_RUN_PIPESWAP on and verified (these streams swap no vertex program: no change).
+	add_test(NAME draw_run_inline_pipeswap
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_inline_pipeswap PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PIPESWAP=1")
+	add_test(NAME draw_run_inline_pipeswap_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_inline_pipeswap_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=exit;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PIPESWAP=1")
 	# KYTY_DRAW_RUN_WRITES: draws that store through a V# form runs (and one storing over its own
 	# texture never continues); off, on, verified, inline and parallel.
 	add_test(NAME draw_run_writes_off

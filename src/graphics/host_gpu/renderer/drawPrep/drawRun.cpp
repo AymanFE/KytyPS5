@@ -80,6 +80,10 @@ Live::Switch g_targets("KYTY_DRAW_RUN_TARGETS", [](const char* value) -> int64_t
 	return std::strcmp(value, "exit") == 0 ? 3 : 1;
 });
 
+// A record made with the swap on is only continued by a swap while it stays on.
+Live::Switch g_pipeswap("KYTY_DRAW_RUN_PIPESWAP", Live::ParseDefaultOff,
+                        [](int64_t, int64_t) { NoteForeignActivity("KYTY_DRAW_RUN_PIPESWAP change"); });
+
 } // namespace Detail
 
 namespace {
@@ -159,9 +163,13 @@ uint64_t ActivityEpoch() noexcept {
 }
 
 uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_config,
-                      const DrawPrep::PreparedDraw& prepared, uint64_t* targets_key) {
+                      const DrawPrep::PreparedDraw& prepared, uint64_t* targets_key,
+                      uint64_t* swap_key) {
 	if (targets_key != nullptr) {
 		*targets_key = 0;
+	}
+	if (swap_key != nullptr) {
+		*swap_key = 0;
 	}
 	if (!prepared.ok || prepared.failure != DrawPrep::Failure::None ||
 	    !prepared.vertex_info.stage.program) {
@@ -182,17 +190,25 @@ uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_con
 	const std::array<const void*, 2> programs {prepared.vertex_info.stage.program,
 	                                          prepared.pixel_active ? prepared.pixel_info.stage.program
 	                                                                : nullptr};
-	hash = HashBytes(hash, programs.data(), sizeof(programs));
 	const uint32_t flags = (prepared.pixel_active ? 1u : 0u) |
 	                       (prepared.programs.VertexStageCount() == 1 ? 2u : 0u);
-	hash = HashBytes(hash, &flags, sizeof(flags));
-	hash = HashValues(hash, prepared.vertex_prep.resources.images);
-	hash = HashValues(hash, prepared.vertex_prep.resources.samplers);
+	// The words: hashed once, then chained into the key with and without the vertex program.
+	uint64_t words = HashValues(0x51ed27c3ull, prepared.vertex_prep.resources.images);
+	words          = HashValues(words, prepared.vertex_prep.resources.samplers);
 	if (prepared.pixel_active) {
-		hash = HashValues(hash, prepared.pixel_prep.resources.images);
-		hash = HashValues(hash, prepared.pixel_prep.resources.samplers);
+		words = HashValues(words, prepared.pixel_prep.resources.images);
+		words = HashValues(words, prepared.pixel_prep.resources.samplers);
 	}
-	return hash != 0 ? hash : 1;
+	const auto chain = [&](const std::array<const void*, 2>& chained) {
+		uint64_t result = HashBytes(hash, chained.data(), sizeof(chained));
+		result          = HashBytes(result, &flags, sizeof(flags));
+		result          = HashBytes(result, &words, sizeof(words));
+		return result != 0 ? result : 1;
+	};
+	if (swap_key != nullptr) {
+		*swap_key = chain({nullptr, programs[1]});
+	}
+	return chain(programs);
 }
 
 Totals& GetTotals() {
@@ -453,7 +469,7 @@ void PrintSummary() {
 		return;
 	}
 	static uint64_t                                          last_ns = 0;
-	static std::array<uint64_t, 24>                          last {};
+	static std::array<uint64_t, 27>                          last {};
 	static std::array<uint64_t, static_cast<size_t>(Miss::Count)> last_misses {};
 	// KYTY_CP_OWNED_COUNTERS (ownedCounters.h): the clock is read every 256th call (the line is
 	// due every 10 s; the commit path calls this once per draw).
@@ -469,7 +485,7 @@ void PrintSummary() {
 	if (now - last_ns < 10'000'000'000ull) {
 		return;
 	}
-	const std::array<uint64_t, 24> values {
+	const std::array<uint64_t, 27> values {
 	    g_totals.draws.load(std::memory_order_relaxed),
 	    g_totals.eligible.load(std::memory_order_relaxed),
 	    g_totals.key_matches.load(std::memory_order_relaxed),
@@ -493,8 +509,11 @@ void PrintSummary() {
 	    g_totals.epoch_checks.load(std::memory_order_relaxed),
 	    g_totals.epoch_mismatches.load(std::memory_order_relaxed),
 	    g_totals.targets_kept.load(std::memory_order_relaxed),
-	    g_totals.targets_late.load(std::memory_order_relaxed)};
-	std::array<uint64_t, 24> delta {};
+	    g_totals.targets_late.load(std::memory_order_relaxed),
+	    g_totals.swap_matches.load(std::memory_order_relaxed),
+	    g_totals.swapped.load(std::memory_order_relaxed),
+	    g_totals.swap_incompatible.load(std::memory_order_relaxed)};
+	std::array<uint64_t, 27> delta {};
 	for (size_t i = 0; i < values.size(); i++) {
 		delta[i] = values[i] - last[i];
 	}
@@ -526,14 +545,16 @@ void PrintSummary() {
 	            " deferred; writes: %" PRIu64 " records, %" PRIu64 " continued; recall: %" PRIu64
 	            " matches, %" PRIu64 " recalled, %" PRIu64 " sets missed; image epoch: %" PRIu64
 	            " skips, verify %" PRIu64 " checks, %" PRIu64 " mismatches; targets: %" PRIu64
-	            " kept, %" PRIu64 " late\n",
+	            " kept, %" PRIu64 " late; pipeswap: %" PRIu64 " matches, %" PRIu64 " swapped, %" PRIu64
+	            " incompatible\n",
 	            static_cast<double>(now - last_ns) * 1e-9,
 	            GetMode() == Mode::Verify ? "verify" : "on", delta[0], delta[1], delta[2], delta[3],
 	            delta[0] != 0 ? 100.0 * static_cast<double>(delta[3]) / static_cast<double>(delta[0])
 	                          : 0.0,
 	            delta[4], misses.empty() ? " none" : misses.c_str(), delta[6], delta[7], delta[8],
 	            delta[9], delta[10], delta[11], delta[12], delta[13], delta[14], delta[15], delta[16],
-	            delta[17], delta[18], delta[19], delta[20], delta[21], delta[22], delta[23]);
+	            delta[17], delta[18], delta[19], delta[20], delta[21], delta[22], delta[23], delta[24],
+	            delta[25], delta[26]);
 	std::fflush(stdout);
 	if (KeyDiagEnabled()) {
 		PrintKeyDiag(static_cast<double>(now - last_ns) * 1e-9);
