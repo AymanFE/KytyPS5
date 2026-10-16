@@ -4190,8 +4190,8 @@ CpSeq::Result CommandProcessor::ExecuteOp(CpSeq::OpKind kind, const void* payloa
 	}
 	// KYTY_DISPATCH_OVERLAP (render.h): any operation but a direct dispatch (and the verifier's read
 	// checks) may order the dispatches around it: draws, synchronization, labels, waits, flips.
-	if (kind != OpKind::DispatchDirect && kind != OpKind::ReadCheck) {
-		CurrentBuffer().BreakDispatchOverlap();
+	if (kind != OpKind::DispatchDirect && kind != OpKind::ReadCheck && GetScheduler().Active()) {
+		GetScheduler().Current().BreakDispatchOverlap();
 	}
 	CommitStats::StepMark(CommitStats::Step::GapOpHead);
 	switch (kind) {
