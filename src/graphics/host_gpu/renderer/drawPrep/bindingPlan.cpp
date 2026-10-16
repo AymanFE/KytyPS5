@@ -249,6 +249,12 @@ bool PredictTargets(const GraphicContext& graphics, const HW::Context& ctx,
 		if (rt.base.addr == 0 || render_target_mask_slot(ctx.GetRenderTargetMask(), slot) == 0) {
 			continue; // no target in this slot
 		}
+		// KYTY_MRT_SPLIT (renderDraw.cpp): a surface bound to two slots splits the draw; no plan.
+		for (uint32_t index = 0; index < targets.color_count; index++) {
+			if (ctx.GetRenderTarget(targets.colors[index].slot).base.addr == rt.base.addr) {
+				return false;
+			}
+		}
 		const auto samples = render_sample_count(rt.attrib.num_fragments);
 		if (samples == 0 || rt.attrib.num_samples != rt.attrib.num_fragments) {
 			return false; // the resolution stops the emulator

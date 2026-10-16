@@ -1469,6 +1469,12 @@ private:
 	bool          m_in_engine_commit   = false;
 	bool          m_prepared_validated = false; // RefreshShaders accepted the draw's preparation
 	uint32_t      m_run_slice_offset   = 0;
+	// KYTY_MRT_SPLIT (renderDraw.cpp AliasedColorSlots): the colour slots this pass of a draw may bind
+	// (~0: all), whether the draw may split (DrawIndex, DrawAuto), and the slots its first pass left
+	// out for a second pass.
+	uint32_t      m_mrt_filter         = ~0u;
+	bool          m_mrt_split_allowed  = false;
+	uint32_t      m_mrt_split_slots    = 0;
 
 	friend class CommandProcessor;
 	friend class DrawPrep::Engine;

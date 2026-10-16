@@ -2099,6 +2099,54 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	return true;
 }
 
+// KYTY_MRT_SPLIT (default on; YOTEI 44ea334d4): slots of mask that write the same surface as a
+// lower slot of it, each with channels of its own. Astro Bot's foliage-interaction stamps write RG
+// (blended) through MRT0 and BA through MRT1 of one 1024x1024 surface; one image bound as two
+// Vulkan colour attachments is undefined, and NVIDIA lost the stamps (grass ignored the hover laser
+// or bent ahead of Astro). Such a draw (DrawIndex, DrawAuto) runs twice: once without these slots,
+// once with only them, each pass keeping its slots' masks and blends. KYTY_MRT_SPLIT=0 binds them
+// together as before.
+static bool MrtSplitEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_MRT_SPLIT");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+static uint32_t AliasedColorSlots(const HW::Context& ctx, uint32_t mask) {
+	uint32_t aliased = 0;
+	for (uint32_t later = 1; later < RENDER_COLOR_ATTACHMENTS_MAX; later++) {
+		if ((mask & (1u << later)) == 0) {
+			continue;
+		}
+		const auto later_addr = ctx.GetRenderTarget(later).base.addr;
+		const auto later_mask = render_target_mask_slot(ctx.GetRenderTargetMask(), later);
+		if (later_addr == 0 || later_mask == 0) {
+			continue;
+		}
+		for (uint32_t first = 0; first < later; first++) {
+			if ((mask & (1u << first)) != 0 && (aliased & (1u << first)) == 0 &&
+			    ctx.GetRenderTarget(first).base.addr == later_addr &&
+			    (render_target_mask_slot(ctx.GetRenderTargetMask(), first) & later_mask) == 0) {
+				aliased |= 1u << later;
+				break;
+			}
+		}
+	}
+	return aliased;
+}
+
+// KYTY_MRT_SPLIT accounting: the first splits are logged, then a count every 4096.
+static void NoteMrtSplit(uint32_t slots) {
+	static std::atomic<uint64_t> count {0};
+	const auto                   n = count.fetch_add(1, std::memory_order_relaxed) + 1u;
+	if (n <= 4u || (n & 4095u) == 0u) {
+		std::printf("MRT split: draw #%llu runs a second pass for colour slots 0x%x (one surface bound "
+		            "to several slots)\n",
+		            static_cast<unsigned long long>(n), slots);
+	}
+}
 // The draw's colour and depth target resolution (PrepareDrawRenderState; a KYTY_DRAW_RUN
 // continuation whose images changed resolves them late, from the same registers).
 void RenderExecutor::DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -2115,6 +2163,14 @@ void RenderExecutor::DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& d
 	}
 	if (SkipInactivePixelShadersEnabled()) {
 		mrt_mask &= DrawColorOutputFilter(buffer.GetRegisters());
+	}
+	// KYTY_MRT_SPLIT: the first pass of a draw that binds one surface to several slots leaves the
+	// later ones for a second pass (m_mrt_split_slots); the second pass binds only those.
+	mrt_mask &= m_mrt_filter;
+	if (m_mrt_split_allowed && m_mrt_filter == ~0u && (mrt_mask & (mrt_mask - 1u)) != 0 &&
+	    MrtSplitEnabled()) {
+		m_mrt_split_slots = AliasedColorSlots(buffer.GetRegisters(), mrt_mask);
+		mrt_mask &= ~m_mrt_split_slots;
 	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
@@ -4318,7 +4374,12 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	state.Reset();
 	CommitStats::StepMark(CommitStats::Step::StateReset);
 	CommitStats::Mark(CommitStats::Phase::Setup);
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	m_mrt_split_slots   = 0;
+	m_mrt_split_allowed = true;
+	const bool prepared = PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
+	m_mrt_split_allowed = false;
+	if (!prepared) {
+		m_mrt_split_slots = 0;
 		ResetBindings();
 		return;
 	}
@@ -4355,6 +4416,22 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	                    primitive_restart);
 	ResetBindings();
 	CommitStats::StepMark(CommitStats::Step::ResetBindings);
+	if (const auto split = std::exchange(m_mrt_split_slots, 0u); split != 0u) {
+		// KYTY_MRT_SPLIT: the second pass, with only the slots the first left out.
+		NoteMrtSplit(split);
+		m_run.valid = false;
+		BeginDrawRun();
+		state.Reset();
+		m_mrt_filter = split;
+		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
+			                    primitive_restart);
+		}
+		m_mrt_filter = ~0u;
+		ResetBindings();
+		m_run.valid = false;
+		BeginDrawRun();
+	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -4430,7 +4507,12 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	state.Reset();
 	CommitStats::StepMark(CommitStats::Step::StateReset);
 	CommitStats::Mark(CommitStats::Phase::Setup);
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	m_mrt_split_slots   = 0;
+	m_mrt_split_allowed = true;
+	const bool prepared = PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
+	m_mrt_split_allowed = false;
+	if (!prepared) {
+		m_mrt_split_slots = 0;
 		ResetBindings();
 		return;
 	}
@@ -4445,6 +4527,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		m_mrt_split_slots = 0;
 		ResetBindings();
 		return;
 	}
@@ -4464,6 +4547,21 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
 	ResetBindings();
 	CommitStats::StepMark(CommitStats::Step::ResetBindings);
+	if (const auto split = std::exchange(m_mrt_split_slots, 0u); split != 0u) {
+		// KYTY_MRT_SPLIT: the second pass, with only the slots the first left out.
+		NoteMrtSplit(split);
+		m_run.valid = false;
+		BeginDrawRun();
+		state.Reset();
+		m_mrt_filter = split;
+		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
+		}
+		m_mrt_filter = ~0u;
+		ResetBindings();
+		m_run.valid = false;
+		BeginDrawRun();
+	}
 }
 
 // Mirrors DrawIndex/DrawAuto with DrawOffsetSource::IndirectArgs, except that the counts, first
