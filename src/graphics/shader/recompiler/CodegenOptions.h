@@ -127,14 +127,14 @@ struct CodegenOptions {
 	// slower on the RTX 3090 for Astro Bot's heaviest LDS kernel (cs 0x6856320a9c6f89fd: 1.42 -> 2.33 ms).
 	// Device-buffer LDS and GDS keep their branches.
 	bool branchless_lds = false;
-	// KYTY_LANE_LOCAL (default on since claude/u59-gpu, =0 off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
+	// KYTY_LANE_LOCAL=1 (default off; chenxiao07/KytyPS5 9907780e1, 9bb47e15d): a wave64 compute program
 	// proven lane-local (Frontend::IsWaveLaneLocal: its lanes' results depend on no lane outside their
 	// 32-lane half) runs one guest lane per host invocation on a host whose compute subgroups are fixed at
 	// 32 lanes (NVIDIA), each subgroup a half wave with its own copy of the scalar state, instead of two
 	// lanes per invocation. Hosts with 64-wide subgroups already run one lane per invocation. A program
 	// the proof accepts only with KYTY_LANE_LOCAL_UNIFORM_LOADS=1 keeps two lanes. KYTY_LANE_LOCAL_LOG=1
 	// prints each verdict.
-	bool lane_local = true;
+	bool lane_local = false;
 	// KYTY_READONLY_BUFFERS=0: leave the storage buffers of a program that never stores to them
 	// (no buffer store or atomic, no coherent load) without NonWritable. With it, the AMD driver
 	// loads a uniform address once per wave into scalar registers instead of once per lane
