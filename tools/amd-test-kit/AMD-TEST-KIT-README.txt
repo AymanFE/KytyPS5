@@ -20,7 +20,7 @@ How to run it
    _SaveData) to a new folder, then unzip this build into that new folder and let it overwrite the
    files. Your patch choices (_Patches\PPSA21564.json) must be there: the kit warns if they are
    not. The kit files are AMD-Test-Kit.cmd and AMD-Test-Kit.ps1, next to kyty_emulator.exe.
-2. Start launcher.exe from the new folder once, check that Astro Bot is in the list with your
+2. Start kyty_launcher.exe (launcher.exe in older builds) from the new folder once, check that Astro Bot is in the list with your
    usual settings and patches (both lighting patches and the fixed 1920x1080 resolution), then
    CLOSE the launcher again. Do not start the game from the launcher.
 3. Double-click AMD-Test-Kit.cmd. A console window shows each run. The game window opens and

@@ -77,7 +77,7 @@ if(WIN32)
 	)
 endif()
 
-set(launcher_name "launcher")
+set(launcher_name "kyty_launcher")
 if(APPLE)
 	set(launcher_name "KytyPS5")
 endif()
@@ -101,6 +101,16 @@ endif()
 install(TARGETS launcher
 	BUNDLE DESTINATION .
 	RUNTIME DESTINATION .)
+
+if(NOT APPLE AND KYTY_BUILD_ORIGIN STREQUAL "Official")
+	# Older releases require the previous executable name when validating updates. Only Official
+	# builds self-update; other builds ship kyty_launcher alone (no second copy under the old name).
+	install(CODE "
+		file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\"
+			TYPE PROGRAM RENAME \"launcher${CMAKE_EXECUTABLE_SUFFIX}\"
+			FILES \"\${CMAKE_INSTALL_PREFIX}/${launcher_name}${CMAKE_EXECUTABLE_SUFFIX}\")
+	")
+endif()
 
 if(APPLE)
 	install(TARGETS kyty_emulator DESTINATION "KytyPS5.app/Contents/MacOS")
