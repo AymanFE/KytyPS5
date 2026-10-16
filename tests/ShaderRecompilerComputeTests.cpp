@@ -1869,6 +1869,8 @@ struct TestCase {
   // (upstream c3f496271; overrides the dword range when set).
   size_t storage_buffer_range_dwords = 0;
   size_t storage_buffer_range_bytes = 0;
+  // Per buffer resource (upstream): {host offset, range} of its descriptor; overrides the above.
+  std::vector<std::pair<u32, u32>> storage_buffer_ranges;
   std::vector<u32> storage_buffer_offsets;
   std::vector<BdaMapping> bda_mappings;
   bool expand_shader_data_storage = false;
@@ -27719,8 +27721,14 @@ public:
         info.buffer = buffer.buffer;
         info.offset = 0;
         info.range = buffer.size;
-        if (test.storage_buffer_range_dwords != 0 || test.storage_buffer_range_bytes != 0) {
-          const auto resource = buffers->resources[i];
+        if (const auto resource = buffers->resources[i];
+            resource < test.storage_buffer_ranges.size()) {
+          const auto [offset, size] = test.storage_buffer_ranges[resource];
+          info.offset = offset;
+          info.range = size;
+          Require(test.name, "dispatch", uint64_t{offset} + size <= buffer.size,
+                  "storage buffer view exceeds its backing buffer");
+        } else if (test.storage_buffer_range_dwords != 0 || test.storage_buffer_range_bytes != 0) {
           const auto offset = resource < test.storage_buffer_offsets.size()
                                   ? test.storage_buffer_offsets[resource]
                                   : 0u;
@@ -27850,7 +27858,9 @@ public:
           view.viewType = test.sampled_image_view_type;
           view.format = source_image->format;
           view.subresourceRange = {
-              image.depth_compare ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor, mip, 1,
+              compiled.program.info.images[resource].depth_compare ? vk::ImageAspectFlagBits::eDepth
+                                                                   : vk::ImageAspectFlagBits::eColor,
+              mip, 1,
               test.sampled_image_view_base_layer,
               test.sampled_image_view_layers != 0
                   ? test.sampled_image_view_layers
