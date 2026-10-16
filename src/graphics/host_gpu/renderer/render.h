@@ -194,8 +194,8 @@ struct DrawAutoArgs {
 // would still hold it (DescriptorSetAudit*; compare DescriptorSetsReused).
 [[nodiscard]] bool DescriptorSetReuseAuditEnabled();
 [[nodiscard]] bool UploadBatchEnabled();
-// KYTY_DISPATCH_OVERLAP (live, needs the batcher): consecutive direct guest dispatches that the
-// guest does not order overlap on the GPU, as on the console. Every dispatch requests, after
+// KYTY_DISPATCH_OVERLAP (live, default on, needs the batcher): consecutive direct guest dispatches
+// that the guest does not order overlap on the GPU, as on the console. Every dispatch requests, after
 // itself, a dependency from compute shader accesses to everything later (BarrierOrigin::
 // ShaderAccess), and a dispatch with storage writes one from everything earlier to it
 // (ShaderWriteHazard); between two dispatches they merge into one compute -> compute barrier that

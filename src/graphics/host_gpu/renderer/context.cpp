@@ -37,8 +37,8 @@ namespace Libs::Graphics {
 // KYTY_CP_SINK_ROUTES (default 1, live): CommandBuffer::HelperSink() encodes for the recorder; 0
 // drains it and records natively, as the helpers' former Handle() did.
 static Live::Switch g_sink_routes("KYTY_CP_SINK_ROUTES", Live::ParseDefaultOn);
-// KYTY_DISPATCH_OVERLAP (render.h DispatchOverlapEnabled): live; default off.
-static Live::Switch g_dispatch_overlap("KYTY_DISPATCH_OVERLAP", Live::ParseDefaultOff);
+// KYTY_DISPATCH_OVERLAP (render.h DispatchOverlapEnabled): live; default on.
+static Live::Switch g_dispatch_overlap("KYTY_DISPATCH_OVERLAP", Live::ParseDefaultOn);
 
 // ------------------------------------------------------------------------------------------------
 // Barrier batcher
