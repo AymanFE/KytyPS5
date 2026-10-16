@@ -27,6 +27,11 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 // compiler-rt profile runtime (instrumented builds, CMake KYTY_PGO_GENERATE).
 extern "C" void __llvm_profile_set_filename(const char*);
@@ -49,7 +54,17 @@ static void StartPgoDumps() {
 	}
 	const char* seconds_text = std::getenv("KYTY_PGO_DUMP_SECONDS");
 	const int   seconds      = (seconds_text != nullptr && std::atoi(seconds_text) > 0) ? std::atoi(seconds_text) : 20;
-	static const std::string target = file;
+	// "%p" in the name becomes the process id, so repeated launches (a player's own training
+	// sessions) each keep their own profile instead of overwriting the previous one.
+	std::string name = file;
+	if (const auto at = name.find("%p"); at != std::string::npos) {
+#if defined(_WIN32)
+		name.replace(at, 2, std::to_string(_getpid()));
+#else
+		name.replace(at, 2, std::to_string(getpid()));
+#endif
+	}
+	static const std::string target = name;
 	static const std::string temp   = target + ".tmp";
 	::printf("PGO: writing the profile to %s every %d s\n", target.c_str(), seconds);
 	std::thread([seconds]() {
