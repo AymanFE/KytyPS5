@@ -22781,7 +22781,9 @@ public:
                   compiled.program.info.images[0].depth_compare,
               "explicit comparison gather lost its depth resource");
       std::memset(mapped, 0, allocation_size);
-      RenderContext context(m_runtime_context);
+      // Several MiB: never on the main-thread stack (MakeRenderContext).
+      const auto context_owner = MakeRenderContext();
+      auto &context = *context_owner;
       auto &scheduler = context.GetCommandScheduler();
       HW::Context registers{};
       HW::UserConfig user_config{};
