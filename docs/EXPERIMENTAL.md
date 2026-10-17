@@ -279,7 +279,8 @@ From int5 (`u59-windows-20261003-int5`):
     queries (`KYTY_RECORDER_DESCRIPTOR_SETS`, `KYTY_PUSH_SHADOW_FRESH_SKIP`, `KYTY_META_CLEAR_MEMO`,
     `KYTY_PENDING_REFRESH_US`).
 - Lower VRAM use, also behind preset flags:
-  - sparse residency for partially resident textures and for the BDA page table;
+  - sparse residency for partially resident textures (`KYTY_TEXTURE_SPARSE_RESIDENCY=auto`: only on cards that
+    report less than 15 GiB of VRAM, the 16 GB class and up keep full mip chains) and for the BDA page table;
   - idle limits for the native image pool and the tiler scratch pool;
   - images unused for 600 frames are freed.
 - Upstream KytyPS5 changes up to the first sync: controller, audio and compatibility fixes, and the layered VideoOut

@@ -100,6 +100,10 @@ const std::vector<std::string_view>& MarkerKeys() {
 	    "KYTY_FUNCTION_ARRAY_SHRINK",
 	    "KYTY_SHADER_PRECOMPILE",
 	    "KYTY_PIPELINE_JOURNAL",
+	    // Missing from the int19.4 release preset (draw reuse off): an old file is named.
+	    "KYTY_DRAW_RUN_RECALL",
+	    "KYTY_DRAW_RUN_TARGETS",
+	    "KYTY_DRAW_RUN_PIPESWAP",
 	};
 	return keys;
 }
