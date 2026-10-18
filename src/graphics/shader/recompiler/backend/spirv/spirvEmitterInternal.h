@@ -125,6 +125,21 @@ struct EmitterState {
 	const SpirvRequirements                          requirements;
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
+	// KYTY_WAVE64_WARPS (split wave): a wave64 compute workgroup of one wave runs as two 32-wide
+	// host subgroups, one guest lane per invocation (lane_count 1). Cross-lane operations
+	// exchange the halves through workgroup memory (ExchangeWaveValue), and DS accesses
+	// synchronize the halves the guest ran in lockstep.
+	bool                                             split_wave              = false;
+	uint32_t                                         wave_exchange_variable  = 0;
+	uint32_t                                         wave_exchange_parity    = 0;
+	// Blocks whose conditional branch each half decides on its own lanes (SplitWaveLocalBranches).
+	std::unordered_set<const IR::Block*>             wave_local_branches;
+	// The probe emission: every branch is half-local, and wave_sync_blocks collects the blocks
+	// that synchronize the halves.
+	bool                                             wave_probe              = false;
+	std::unordered_set<const IR::Block*>*            wave_sync_blocks        = nullptr;
+	// DS instructions write the LDS, so DS reads must wait for the other half too.
+	bool                                             ds_writes_lds           = false;
 	// KYTY_WAVE32_CLUSTERS (Spirv::WaveClustersActive): a wave32 program on a host subgroup that may
 	// hold two guest waves keeps each to its own 32 lanes (EmitSubgroupLocalInvocationId,
 	// EmitHostLane, EmitWaveBallot).
@@ -465,6 +480,34 @@ uint32_t EmitLocalInvocationIndex(EmitterState& state);
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t ballot, uint32_t lane);
 
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane);
+
+// Split waves (EmitterState::split_wave). Whether lane operations confined to 32-lane halves use
+// the host subgroup's lane (lane & 31): two lanes per invocation or a split wave.
+[[nodiscard]] inline bool HalfWaveHost(const EmitterState& state) {
+	return state.lane_count == 2 || state.split_wave;
+}
+// The invocation's lane in its host subgroup (0-31 for a split wave).
+uint32_t EmitHostSubgroupLane(EmitterState& state);
+// Records that the block being emitted synchronizes a split wave's halves.
+void     NoteWaveSync(EmitterState& state);
+// Synchronizes a split wave's halves and makes their workgroup memory writes visible.
+void     EmitWaveBarrier(EmitterState& state);
+// The value (u32) of guest lane `lane` (0-63) of a split wave, through workgroup memory.
+uint32_t ExchangeWaveValue(EmitterState& state, uint32_t value, uint32_t lane);
+// The 64-lane ballot of `predicate` in a split wave, as {low lanes, high lanes, 0, 0}.
+uint32_t ExchangeWaveBallot(EmitterState& state, uint32_t predicate);
+// The ballot word of `predicate` over the invocation's own host subgroup.
+uint32_t EmitHostBallotWord(EmitterState& state, uint32_t predicate);
+// The invocation's host-subgroup ballot placed as a wave ballot whose lane bits are right for
+// lanes of the invocation's own half: {word, word, 0, 0}.
+uint32_t EmitHalfBallot(EmitterState& state, uint32_t predicate);
+// Reads `value` (any 32-bit or bool type) from guest lane `lane` of the invocation's own half.
+uint32_t ReadHostSubgroupLane(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane);
+// The blocks whose conditional branch a split wave's halves may decide on their own: no block
+// the branch controls synchronizes the halves (sync_blocks), directly or through another branch
+// that stays whole-wave, and no such block ends the program.
+std::unordered_set<const IR::Block*> SplitWaveLocalBranches(
+    const IR::Program& program, const std::unordered_set<const IR::Block*>& sync_blocks);
 
 inline constexpr auto EmitAddU32 = EmitNative<spv::OpIAdd, IR::Type::U32, uint32_t, uint32_t>;
 

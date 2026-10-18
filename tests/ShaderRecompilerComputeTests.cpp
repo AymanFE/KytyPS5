@@ -2156,7 +2156,13 @@ void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
     }
     offset += words.size();
   }
-  if (test.required_spirv.empty() && test.forbidden_spirv.empty()) {
+  // KYTY_TEST_SKIP_SPIRV_TEXT=1: run the cases under codegen switches whose SPIR-V the text
+  // expectations do not describe (e.g. KYTY_WAVE64_WARPS=1), keeping only the result checks.
+  static const bool skip_text = [] {
+    const char *value = std::getenv("KYTY_TEST_SKIP_SPIRV_TEXT");
+    return value != nullptr && value[0] == '1';
+  }();
+  if (skip_text || (test.required_spirv.empty() && test.forbidden_spirv.empty())) {
     return;
   }
 

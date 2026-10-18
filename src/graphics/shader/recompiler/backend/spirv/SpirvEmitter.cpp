@@ -629,6 +629,47 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	// KYTY_LANE_LOCAL: a proven lane-local wave64 program runs one guest lane per invocation.
 	state.lane_count =
 	    program.lane_local ? 1u : ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
+	if (state.lane_count == 2 && GetCodegenOptions().wave64_warps &&
+	    program.stage == ShaderType::Compute && !program.dispatcher_fallback &&
+	    // BVH node counts (KYTY_RT_NODE_BUDGET/STATS) report per two-lane invocation.
+	    !IR::UsesBvhNodeCount(program) &&
+	    !state.requirements.compute_derivatives && !state.requirements.shared_int64_atomics &&
+	    state.lds_storage_class == spv::StorageClassWorkgroup) {
+		// KYTY_WAVE64_WARPS: the workgroup must be exactly the one wave (its barriers then
+		// synchronize the wave, and every lane exists).
+		const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
+		if (workgroup != nullptr && std::max(workgroup->threads_num[0], 1u) *
+		                                    std::max(workgroup->threads_num[1], 1u) *
+		                                    std::max(workgroup->threads_num[2], 1u) ==
+		                                64u) {
+			state.split_wave = true;
+			state.lane_count = 1;
+			// A probe emission with every branch half-local finds the blocks that synchronize
+			// the halves; branches that control none of them stay half-local.
+			std::unordered_set<const IR::Block*> sync_blocks;
+			{
+				EmitterState probe(program, input_info);
+				probe.mip_stats_records = mip_stats_records;
+				probe.split_wave        = true;
+				probe.lane_count        = 1;
+				probe.wave_probe        = true;
+				probe.wave_sync_blocks  = &sync_blocks;
+				DefineModule(probe);
+				EmitProgram(probe);
+			}
+			state.wave_local_branches = SplitWaveLocalBranches(program, sync_blocks);
+			static const bool log = std::getenv("KYTY_WAVE64_WARPS_LOG") != nullptr;
+			if (log) {
+				size_t branches = 0;
+				for (const auto& info: program.block_info) {
+					branches += info.terminator.kind == CFG::TerminatorKind::ConditionalBranch ? 1u : 0u;
+				}
+				std::printf("SplitWave CS %016" PRIx64 ": %zu of %zu branches half-local, %zu sync blocks\n",
+				            program.shader_hash, state.wave_local_branches.size(), branches,
+				            sync_blocks.size());
+			}
+		}
+	}
 	state.wave_clusters = state.lane_count == 1 && WaveClustersActive(program);
 	if (state.wave_clusters && program.stage != ShaderType::Compute) {
 		NoteClusteredProgram(program);

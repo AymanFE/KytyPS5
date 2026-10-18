@@ -581,8 +581,9 @@ void DefineInputs(EmitterState& state) {
 		    })) {
 			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		}
-	} else if (state.program.lane_local) {
-		// KYTY_LANE_LOCAL: the guest lane of ADD_TID buffers (BufferLane).
+	} else if (state.program.lane_local || state.split_wave) {
+		// KYTY_LANE_LOCAL: the guest lane of ADD_TID buffers (BufferLane). KYTY_WAVE64_WARPS: the
+		// guest lane (EmitSubgroupLocalInvocationId) and the exchange slot.
 		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 	}
 	for (auto& input: state.inputs) {
@@ -679,7 +680,7 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.requirements.subgroup_local_invocation_id) {
+	if (state.requirements.subgroup_local_invocation_id || state.split_wave) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -811,6 +812,13 @@ void DefineModule(EmitterState& state) {
 	DefineOutputs(state);
 	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);
+	if (state.split_wave) {
+		// Two alternating halves of one dword per guest lane (ExchangeWaveValue).
+		state.wave_exchange_variable = state.builder.DefineGlobalVariable(
+		    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 128), spv::StorageClassWorkgroup);
+		state.builder.AddName(state.wave_exchange_variable, "wave_exchange");
+		state.wave_exchange_parity = state.builder.AllocateId();
+	}
 	if (state.requirements.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
 	}
@@ -884,15 +892,15 @@ void DefineModule(EmitterState& state) {
 	if (state.requirements.image_gather_extended) {
 		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
 	}
-	if (state.lane_count == 2 || state.requirements.subgroup_barrier ||
+	if (state.lane_count == 2 || state.split_wave || state.requirements.subgroup_barrier ||
 	    state.requirements.subgroup_ballot || state.requirements.subgroup_shuffle ||
 	    state.requirements.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.requirements.subgroup_ballot) {
+	if (state.lane_count == 2 || state.split_wave || state.requirements.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}
-	if (state.requirements.subgroup_shuffle) {
+	if (state.requirements.subgroup_shuffle || state.split_wave) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
 	}
 	if (state.requirements.subgroup_arithmetic) {
