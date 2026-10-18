@@ -380,11 +380,20 @@ enum class DescriptorBindingKind : uint32_t {
 	ShaderData,
 	MipStats,
 	SharedMemory,
+	// Buffers only ever read by ReadConstBuffer at immediate offsets (UniformBufferResources):
+	// bound as uniform buffers instead of in Buffers, so the reads go through the constant cache.
+	UniformBuffers,
 	Count,
 };
 
+// The uniform buffer range a UniformBuffers element binds (maxUniformBufferRange is at least
+// 64 KiB on the GPUs that run the emulator). Constant reads stay below it with the base
+// adjustment (< UniformBufferBaseSlack bytes).
+inline constexpr uint32_t UniformBufferBytes     = 65536u;
+inline constexpr uint32_t UniformBufferBaseSlack = 256u;
+
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 58u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;

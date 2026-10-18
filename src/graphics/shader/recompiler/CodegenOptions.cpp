@@ -27,6 +27,9 @@ CodegenOptions FromEnvironment() {
 	options.uniform_lane_reads = EnvFlag("KYTY_UNIFORM_LANE_READS", options.uniform_lane_reads);
 	options.short_f32_helpers  = EnvFlag("KYTY_SHORT_F32_HELPERS", options.short_f32_helpers);
 	options.fast_float_min_max = EnvFlag("KYTY_FAST_FMINMAX", options.fast_float_min_max);
+	options.native_float_min_max = EnvFlag("KYTY_NATIVE_FMINMAX", options.native_float_min_max);
+	options.uniform_buffers      = EnvFlag("KYTY_UNIFORM_BUFFERS", options.uniform_buffers);
+	options.wave64_warps         = EnvFlag("KYTY_WAVE64_WARPS", options.wave64_warps);
 	options.fast_pkrtz         = EnvFlag("KYTY_FAST_PKRTZ", options.fast_pkrtz);
 	options.single_f2i_saturation =
 	    EnvFlag("KYTY_SINGLE_F2I_SATURATION", options.single_f2i_saturation);
@@ -158,6 +161,18 @@ void SetHostComputeSubgroups32(bool fixed_32) {
 
 bool GetHostComputeSubgroups32() {
 	return g_host_compute_subgroups_32.load(std::memory_order_relaxed);
+}
+
+namespace {
+std::atomic<bool> g_host_uniform_buffer_robust {false};
+} // namespace
+
+void SetHostUniformBufferRobust(bool robust) {
+	g_host_uniform_buffer_robust.store(robust, std::memory_order_relaxed);
+}
+
+bool GetHostUniformBufferRobust() {
+	return g_host_uniform_buffer_robust.load(std::memory_order_relaxed);
 }
 
 const CodegenOptions& GetCodegenOptions() {

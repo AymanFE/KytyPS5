@@ -30,6 +30,7 @@ enum HostFloatControlBits : uint32_t {
 
 std::atomic_uint32_t g_host_float_controls {0};
 std::atomic_bool     g_storage_dword_loads_return_zero {false};
+std::atomic_bool     g_uniform_dword_loads_return_zero {false};
 std::atomic_bool     g_image_min_lod {false};
 std::atomic_uint8_t  g_compute_derivatives {static_cast<uint8_t>(HostComputeDerivatives::Khr)};
 std::atomic_uint8_t  g_shader_clock_scope {0};
@@ -61,8 +62,20 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		present[index]   = true;
 		expected[index]  = std::move(resources);
 	};
-	if (!program.info.buffers.empty()) {
-		Expect(Kind::Buffers, Dense(program.info.buffers.size()));
+	{
+		auto uniform = IR::UniformBufferResources(program);
+		std::vector<uint32_t> storage;
+		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+			if (!std::ranges::binary_search(uniform, i)) {
+				storage.push_back(i);
+			}
+		}
+		if (!storage.empty()) {
+			Expect(Kind::Buffers, std::move(storage));
+		}
+		if (!uniform.empty()) {
+			Expect(Kind::UniformBuffers, std::move(uniform));
+		}
 	}
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		const auto kind = IR::DescriptorBindingForImage(program.info.images[i]);
@@ -503,11 +516,16 @@ HostFloatControls GetHostFloatControls() {
 void SetHostBufferRobustness(const HostBufferRobustness& robustness) {
 	g_storage_dword_loads_return_zero.store(robustness.storage_dword_loads_return_zero,
 	                                        std::memory_order_relaxed);
+	g_uniform_dword_loads_return_zero.store(robustness.uniform_dword_loads_return_zero,
+	                                        std::memory_order_relaxed);
+	SetHostUniformBufferRobust(robustness.uniform_dword_loads_return_zero);
 }
 
 HostBufferRobustness GetHostBufferRobustness() {
 	return {.storage_dword_loads_return_zero =
-	            g_storage_dword_loads_return_zero.load(std::memory_order_relaxed)};
+	            g_storage_dword_loads_return_zero.load(std::memory_order_relaxed),
+	        .uniform_dword_loads_return_zero =
+	            g_uniform_dword_loads_return_zero.load(std::memory_order_relaxed)};
 }
 
 void SetHostImageFeatures(const HostImageFeatures& features) {

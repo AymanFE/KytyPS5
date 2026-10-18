@@ -976,6 +976,17 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		robustness.storage_dword_loads_return_zero =
 		    robustness2_ext_enabled && supported_robustness2.robustBufferAccess2 == VK_TRUE &&
 		    robustness2_properties.robustStorageBufferAccessSizeAlignment == 1u;
+		// KYTY_UNIFORM_BUFFERS: uniform ranges are bound in whole dwords. The device checks bounds
+		// in units of this alignment (16 on NVIDIA): a constant read in the last partial unit past
+		// a V#'s end may return the buffer's bytes instead of 0; reads beyond it return 0. The
+		// dword arrays need the standard layout.
+		robustness.uniform_dword_loads_return_zero =
+		    robustness2_ext_enabled && supported_robustness2.robustBufferAccess2 == VK_TRUE &&
+		    robustness2_properties.robustUniformBufferAccessSizeAlignment <= 16u &&
+		    supported_features12.uniformBufferStandardLayout == VK_TRUE;
+		LOGF("Vulkan robustness: uniform alignment=%u constant buffers=%s\n",
+		     static_cast<unsigned>(robustness2_properties.robustUniformBufferAccessSizeAlignment),
+		     robustness.uniform_dword_loads_return_zero ? "uniform" : "storage");
 		ShaderRecompiler::Spirv::SetHostBufferRobustness(robustness);
 		LOGF("Vulkan robustness: robustBufferAccess2=%s storage alignment=%" PRIu64
 		     " shader dword bounds checks=%s\n",
@@ -1321,6 +1332,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	}
 	features12.drawIndirectCount = graphics.draw_indirect_count_enabled ? VK_TRUE : VK_FALSE;
 	features12.samplerFilterMinmax = graphics.sampler_filter_minmax_enabled ? VK_TRUE : VK_FALSE;
+	features12.uniformBufferStandardLayout = supported_features12.uniformBufferStandardLayout;
 	features12.shaderStorageBufferArrayNonUniformIndexing =
 	    graphics.storage_buffer_array_non_uniform_indexing_enabled ? VK_TRUE : VK_FALSE;
 	vk::PhysicalDeviceIndexTypeUint8FeaturesKHR index_type_uint8 {};

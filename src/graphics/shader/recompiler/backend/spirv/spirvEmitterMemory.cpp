@@ -269,9 +269,9 @@ uint32_t LoadBda(ValueEmitContext& ctx, uint32_t address, uint32_t active, uint3
 
 uint32_t ByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	if (mem.kind == IR::ResourceKind::Buffer) {
-		const auto resource = ResourceForDescriptor(ctx.state, IR::DescriptorBindingKind::Buffers,
-		                                            mem.resource);
-		const auto prefix = ctx.state.memory_byte_offsets[resource];
+		(void)ResourceForDescriptor(ctx.state, IR::DescriptorBindingKind::Buffers, mem.resource);
+		// Shader-data byte offsets are per tracked buffer (memory_offset_count == buffers).
+		const auto prefix = ctx.state.memory_byte_offsets[mem.resource];
 		const auto address = Binary(ctx.state, spv::OpIAdd, TypeU32(ctx.state),
 		                            BufferByteAddress(ctx, inst, mem), prefix);
 		// The host binding prefix must not wrap an out-of-range guest address into the buffer.
@@ -1958,6 +1958,25 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	                            ConstantU32(state, mem.offset));
 	const auto index =
 	    Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2));
+	if (const auto* uniform =
+	        IR::FindBinding(state.program.bindings, IR::DescriptorBindingKind::UniformBuffers);
+	    uniform != nullptr && std::ranges::binary_search(uniform->resources, mem.resource)) {
+		// KYTY_UNIFORM_BUFFERS: the uniform view shares the storage view's base adjustment, and
+		// the device reads zero past its dword-aligned range (robustBufferAccess2).
+		const auto array_index =
+		    ResourceForDescriptor(state, IR::DescriptorBindingKind::UniformBuffers, mem.resource);
+		const auto element = Binary(
+		    state, spv::OpIAdd, TypeU32(state), index,
+		    Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+		           state.memory_byte_offsets[mem.resource], ConstantU32(state, 2)));
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassUniform, TypeU32(state)),
+		                          pointer, state.uniform_buffer_variable,
+		                          ConstantU32(state, array_index), ConstantU32(state, 0), element);
+		ctx.Define(inst, EmitNative<spv::OpLoad, IR::Type::U32>(state, pointer));
+		return;
+	}
 	const auto access    = PrepareMemoryResourceAccess(state, mem);
 	// Scalar buffer addressing aligns the base and each offset independently.
 	const auto element = Binary(

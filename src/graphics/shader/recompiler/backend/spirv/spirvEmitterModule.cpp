@@ -313,6 +313,19 @@ void DefineDescriptors(EmitterState& state) {
 				}
 				break;
 			}
+			case IR::DescriptorBindingKind::UniformBuffers: {
+				// std430-style dword array (uniformBufferStandardLayout) of the whole binding range.
+				const auto array = state.builder.DecoratedType(
+				    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, 4u}}},
+				    TypeU32(state), ConstantU32(state, IR::UniformBufferBytes / 4u));
+				const auto block = state.builder.DecoratedType(
+				    spv::OpTypeStruct, {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+				                        {spv::OpDecorate, {spv::DecorationBlock}}},
+				    array);
+				state.uniform_buffer_variable =
+				    Define(ArrayType(block), "uniform_buffers", spv::StorageClassUniform);
+				break;
+			}
 			case IR::DescriptorBindingKind::BdaPagetable:
 				state.bda_pagetable_variable = Define(StorageBufferType(state, 64), "bda_pagetable");
 				break;

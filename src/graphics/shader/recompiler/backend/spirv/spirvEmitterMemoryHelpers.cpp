@@ -176,7 +176,7 @@ MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
 	access.object_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, pointer_type, access.object_pointer, variable,
 	                          ConstantU32(state, array_index));
-	access.byte_offset = state.memory_byte_offsets[array_index];
+	access.byte_offset = state.memory_byte_offsets[mem.resource];
 	access.length      = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpArrayLength, TypeU32(state), access.length,
 	                          access.object_pointer, 0);

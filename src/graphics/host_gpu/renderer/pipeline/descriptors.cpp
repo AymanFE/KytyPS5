@@ -95,6 +95,7 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::ShaderData:
 		case BindingKind::MipStats:
 		case BindingKind::SharedMemory: return vk::DescriptorType::eStorageBuffer;
+		case BindingKind::UniformBuffers: return vk::DescriptorType::eUniformBuffer;
 		case BindingKind::Count: EXIT("invalid native descriptor binding kind");
 	}
 	EXIT("invalid native descriptor binding kind");
@@ -207,7 +208,7 @@ static vk::DescriptorBufferInfo
 NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource& source,
                     const ShaderRecompiler::IR::BufferResource& resource, ShaderType stage,
                     uint32_t slot, uint32_t& buffer_offset,
-                    const std::vector<GuestRange>* written_ranges) {
+                    const std::vector<GuestRange>* written_ranges, bool uniform_view) {
 	buffer_offset = 0;
 
 	const auto& [address, size, id] = source;
@@ -217,7 +218,13 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 		return {context.GetBufferCache().GetBuffer(NULL_BUFFER_ID).Handle(), 0, 16};
 	}
 	const auto& graphics  = context.GetGraphics();
-	const auto  alignment = graphics.StorageMinAlignment();
+	// A buffer bound as a uniform buffer (KYTY_UNIFORM_BUFFERS) meets both offset alignments, so
+	// the one base adjustment in shader data serves either view.
+	const auto  alignment =
+	    uniform_view ? std::max<vk::DeviceSize>(
+	                       graphics.StorageMinAlignment(),
+	                       graphics.GetPhysicalDeviceProperties().limits.minUniformBufferOffsetAlignment)
+	                 : graphics.StorageMinAlignment();
 	if (size > graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange) {
 		EXIT("storage buffer range is unsupported\n");
 	}
@@ -2079,6 +2086,8 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	}
 	prefetch_scope.Stop();
 	CommitStats::StepMark(CommitStats::Step::RbHead);
+	const auto* uniform_binding = ShaderRecompiler::IR::FindBinding(
+	    program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::UniformBuffers);
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		uint32_t   buffer_offset = 0;
 		const auto ranges_start  = program.info.buffers[i].written ? BufferLookupStats::Now() : 0;
@@ -2088,9 +2097,11 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			BufferLookupStats::AddPart(BufferLookupStats::Part::WriteRanges,
 			                           BufferLookupStats::Now() - ranges_start);
 		}
+		const bool uniform_view = uniform_binding != nullptr &&
+		                          std::ranges::binary_search(uniform_binding->resources, i);
 		prepared.buffers.push_back(NativeStorageBuffer(m_context, prepared.buffer_sources[i],
 		                                               program.info.buffers[i], program.stage, i,
-		                                               buffer_offset, written));
+		                                               buffer_offset, written, uniform_view));
 		pack_memory_offset(i, buffer_offset);
 	}
 	CommitStats::StepMark(CommitStats::Step::RbBindings);
@@ -2739,6 +2750,22 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 							m_descriptor_buffers.push_back(view);
 						}
 						break;
+					case BindingKind::UniformBuffers: {
+						// KYTY_UNIFORM_BUFFERS: the storage view, its range cut to the uniform
+						// array the shader declares (constant reads stay inside it).
+						const auto max_range = std::min<vk::DeviceSize>(
+						    ShaderRecompiler::IR::UniformBufferBytes,
+						    m_context.GetGraphics()
+						        .GetPhysicalDeviceProperties()
+						        .limits.maxUniformBufferRange);
+						for (const auto resource: binding.resources) {
+							auto view = descriptors.buffers.at(resource);
+							EXIT_IF(view.buffer == nullptr);
+							view.range = std::min(view.range, max_range);
+							m_descriptor_buffers.push_back(view);
+						}
+						break;
+					}
 					case BindingKind::BdaPagetable:
 					case BindingKind::FaultBuffer: {
 						auto&       cache      = m_context.GetBufferCache();

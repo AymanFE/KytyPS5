@@ -123,6 +123,15 @@ std::vector<uint8_t> CodegenFingerprint() {
 	if (options.cfg_clone_exits) {
 		b.Text("cfg_clone_exits2"); // 2: MergeIgnoringReturnArms
 	}
+	if (options.wave64_warps) {
+		b.Text("wave64_warps");
+	}
+	if (options.native_float_min_max) {
+		b.Text("native_float_min_max");
+	}
+	if (options.uniform_buffers && GetHostUniformBufferRobust()) {
+		b.Text("uniform_buffers");
+	}
 	if (options.lane_local) {
 		b.Text("lane_local");
 		b.U8(GetHostComputeSubgroups32() ? 1u : 0u);

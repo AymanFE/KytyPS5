@@ -101,6 +101,20 @@ struct CodegenOptions {
 	// KYTY_FAST_FMINMAX=0: emulate f32 min/max/min3/max3/med3 with two bit classifications per
 	// min/max instead of one compare-and-select plus a single two-zeros test.
 	bool fast_float_min_max = true;
+	// KYTY_NATIVE_FMINMAX=1 (EmK530/KytyPS5 d6825f587): with KYTY_FAST_FMINMAX, f32 min/max become
+	// GLSL NMin/NMax. They return the other operand for one NaN like the guest, but leave which
+	// zero min/max(-0, +0) returns unspecified and may treat denormals differently from the
+	// guest's compare (see EmitFastMinMaxF32), so this stays opt-in.
+	bool native_float_min_max = false;
+	// KYTY_UNIFORM_BUFFERS=0 (EmK530/KytyPS5 407de5105): keep constant-only buffers in the storage
+	// buffer array instead of binding them as uniform buffers (IR::UniformBufferResources).
+	bool uniform_buffers = true;
+	// KYTY_WAVE64_WARPS=1 (EmK530/KytyPS5 420fc4ead): a wave64 compute program whose workgroup is
+	// the one wave runs on a 32-wide host as two host subgroups, one guest lane per invocation,
+	// instead of two lanes per invocation (Spirv::SplitWaveEligible). Cross-lane operations
+	// exchange the halves through workgroup memory; a branch whose region holds no exchange or
+	// barrier is decided by each half on its own lanes. KYTY_LANE_LOCAL programs stay as they are.
+	bool wave64_warps = false;
 	// KYTY_FAST_PKRTZ=0: convert V_CVT_PKRTZ_F16_F32 halves with the original select chain instead
 	// of the shorter integer formulation.
 	bool fast_pkrtz = true;
@@ -391,6 +405,11 @@ inline constexpr uint32_t LoopGuardHashGdsFromEnd = RtNodeStatsGdsFromEnd + RtNo
 // it once; false until then, which keeps lane-local programs off).
 void               SetHostComputeSubgroups32(bool fixed_32);
 [[nodiscard]] bool GetHostComputeSubgroups32();
+// KYTY_UNIFORM_BUFFERS needs a device that reads 0 for a uniform dword past the bound range
+// (Spirv::HostBufferRobustness::uniform_dword_loads_return_zero, mirrored here by
+// Spirv::SetHostBufferRobustness for IR::UniformBufferResources).
+void               SetHostUniformBufferRobust(bool robust);
+[[nodiscard]] bool GetHostUniformBufferRobust();
 // Test hook: replaces the options for subsequent compilations. Not thread-safe; call it only
 // while no shader is being compiled.
 void SetCodegenOptions(const CodegenOptions& options);

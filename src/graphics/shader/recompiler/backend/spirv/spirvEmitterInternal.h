@@ -130,6 +130,8 @@ struct EmitterState {
 	// EmitHostLane, EmitWaveBallot).
 	bool                                             wave_clusters           = false;
 	uint32_t                                         storage_buffer_variable = 0;
+	// KYTY_UNIFORM_BUFFERS: the constant-only buffers (DescriptorBindingKind::UniformBuffers).
+	uint32_t                                         uniform_buffer_variable = 0;
 	uint32_t                                         storage_buffer_u8_variable = 0;
 	uint32_t                                         storage_buffer_u16_variable = 0;
 	uint32_t                                         storage_buffer_u64_variable = 0;

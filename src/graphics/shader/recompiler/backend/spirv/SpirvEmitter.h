@@ -27,6 +27,11 @@ HostFloatControls GetHostFloatControls();
 // shader's own "dword index < OpArrayLength" check. The device layer sets this once.
 struct HostBufferRobustness {
 	bool storage_dword_loads_return_zero = false;
+	// robustBufferAccess2 with robustUniformBufferAccessSizeAlignment <= 16 and
+	// uniformBufferStandardLayout: a dword uniform load past the range rounded up to that alignment
+	// returns 0,
+	// so constant-only buffers can bind as uniform buffers (KYTY_UNIFORM_BUFFERS).
+	bool uniform_dword_loads_return_zero = false;
 };
 
 void                 SetHostBufferRobustness(const HostBufferRobustness& robustness);
