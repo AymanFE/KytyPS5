@@ -102,6 +102,14 @@ bool IsPlainConstant(const F32Operand& operand) {
 // non-zero constant never forms two zeros.
 F32Operand EmitFastMinMaxF32(EmitterState& state, F32Operand lhs, F32Operand rhs,
                              bool max_value) {
+	if (GetCodegenOptions().native_float_min_max) {
+		// KYTY_NATIVE_FMINMAX: NMin/NMax return the other operand for one NaN, as the guest does;
+		// which zero min/max(-0, +0) returns is left to the host.
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), result, GlslStd450(state),
+		                          max_value ? GLSLstd450NMax : GLSLstd450NMin, lhs.id, rhs.id);
+		return {.id = result};
+	}
 	auto pick = Binary(state, max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
 	                   TypeBool(state), lhs.id, rhs.id);
 	if (!IsNonNanConstant(rhs)) {
