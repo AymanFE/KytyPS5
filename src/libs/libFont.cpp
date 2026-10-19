@@ -15,9 +15,9 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_set>
-#include <utility>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -789,30 +789,31 @@ static bool init_stb_font(FontState* font, const uint8_t* data, uint32_t size) {
 }
 
 struct CjkFallbackFace {
-	std::vector<uint8_t> data;
-	stbtt_fontinfo       info {};
-	bool                 ok = false;
+	std::span<const uint8_t> data;
+	stbtt_fontinfo           info {};
+	bool                     ok = false;
 };
 
 // PS5 system font sets (SC/TC/JP/KR) are not available on the host. The Latin fallback
 // (Roboto) has no CJK glyphs, so missing code points would otherwise become '?'.
+// Resolved once, on the first glyph that needs it. The font file is memory-mapped rather than
+// read, so that first lookup on a guest thread does not stall on a ~20 MB file read; only the
+// pages stb_truetype touches are faulted in.
 static const CjkFallbackFace& cjk_fallback_face() {
 	static const CjkFallbackFace face = [] {
 		CjkFallbackFace result;
 		for (const auto& path: Common::FindCjkFontFiles()) {
-			auto data = read_file_bytes(path);
+			const auto data = Common::MapFileReadOnly(path);
 			if (data.empty()) {
 				continue;
 			}
-			stbtt_fontinfo info {};
-			if (!init_stb_info(&info, data.data(), static_cast<uint32_t>(data.size()))) {
+			// A rejected file stays mapped (address space only, nothing is read); this happens at
+			// most once per candidate for the whole process.
+			if (!init_stb_info(&result.info, data.data(), static_cast<uint32_t>(data.size()))) {
 				continue;
 			}
-			result.data = std::move(data);
-			// stbtt_fontinfo keeps a raw pointer into the buffer; rebuild it after the move.
-			(void)init_stb_info(&result.info, result.data.data(),
-			                    static_cast<uint32_t>(result.data.size()));
-			result.ok = true;
+			result.data = data;
+			result.ok   = true;
 			LOGF("[Font] CJK fallback font: %s\n", path.string().c_str());
 			break;
 		}

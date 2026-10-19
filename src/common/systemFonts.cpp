@@ -1,7 +1,23 @@
 #include "common/systemFonts.h"
 
 #include <cstdlib>
+#include <limits>
 #include <system_error>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace Common {
 
@@ -57,6 +73,50 @@ std::vector<std::filesystem::path> FindCjkFontFiles() {
 #endif
 
 	return result;
+}
+
+std::span<const uint8_t> MapFileReadOnly(const std::filesystem::path& path) {
+#if defined(_WIN32)
+	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+	                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		return {};
+	}
+	LARGE_INTEGER size {};
+	if (GetFileSizeEx(file, &size) == 0 || size.QuadPart <= 0 ||
+	    static_cast<uint64_t>(size.QuadPart) > std::numeric_limits<uint32_t>::max()) {
+		CloseHandle(file);
+		return {};
+	}
+	HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+	CloseHandle(file);
+	if (mapping == nullptr) {
+		return {};
+	}
+	void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+	CloseHandle(mapping);
+	if (view == nullptr) {
+		return {};
+	}
+	return {static_cast<const uint8_t*>(view), static_cast<size_t>(size.QuadPart)};
+#else
+	const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return {};
+	}
+	struct stat st {};
+	if (fstat(fd, &st) != 0 || st.st_size <= 0 ||
+	    static_cast<uint64_t>(st.st_size) > std::numeric_limits<uint32_t>::max()) {
+		close(fd);
+		return {};
+	}
+	void* view = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (view == MAP_FAILED) {
+		return {};
+	}
+	return {static_cast<const uint8_t*>(view), static_cast<size_t>(st.st_size)};
+#endif
 }
 
 } // namespace Common
