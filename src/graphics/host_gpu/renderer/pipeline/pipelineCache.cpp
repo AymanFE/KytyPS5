@@ -7393,6 +7393,18 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineImpl(
 			queued = m_skip->Request(key, vs_input_info, ps_input_info, programs);
 		}
 		const auto poll = m_skip->TryTake(key, queued ? m_skip_wait_ns : 0, ready);
+		// Totals at most every 2 s while skips or skip builds happen (the exit report may not run).
+		const auto report = [this] {
+			static uint64_t last_ns = 0;
+			const auto      now     = CompileClockNs();
+			if (now - last_ns < 2'000'000'000ull) return;
+			last_ns         = now;
+			const auto skip = GetSkipTotals();
+			PipelineCacheLog("Pipeline skip: {} draws skipped so far; {} pipelines queued ({} ms building), {} "
+			                 "published ({} within the wait); {} lookups found the queue full",
+			                 skip.skipped_draws, skip.requested, skip.compile_ns / 1000000, skip.published,
+			                 skip.ready_in_wait, skip.not_queued);
+		};
 		if (poll == PrefetchState::Poll::Pending) {
 			if (m_skip_draws.fetch_add(1, std::memory_order_relaxed) == 0) {
 				PipelineCacheLog("Pipeline skip: first draw skipped while its pipeline builds "
@@ -7400,12 +7412,14 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineImpl(
 				                                       ? vs_input_info.stage.program->shader_hash
 				                                       : 0);
 			}
+			report();
 			return nullptr;
 		}
 		if (poll == PrefetchState::Poll::Ready) {
 			ready_from = m_skip.get();
 			wait_begin = CompileClockNs();
 			if (queued) m_skip_ready_in_wait.fetch_add(1, std::memory_order_relaxed);
+			report();
 		} else {
 			m_skip_not_queued.fetch_add(1, std::memory_order_relaxed);
 		}
