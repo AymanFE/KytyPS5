@@ -10,6 +10,7 @@
 #include "kytyGitVersion.h"
 #include "loader/x64InstructionEmulator.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cinttypes>
 #include <cstdio>
@@ -668,10 +669,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 // memory at 0xfe0000000), so the free ranges below a floor are held for the duration of cuInit and
 // released right after it: CUDA's range lands above the floor, and the guest address space later
 // reserves everything around it.
-// KYTY_CUDA_EARLY_INIT=1 (default) | 0. KYTY_CUDA_VA_FLOOR_GB: the floor in GiB (default 512).
+// KYTY_CUDA_EARLY_INIT=1 turns it on (default off: it adds a DLL, CUDA threads and startup time to
+// every NVIDIA run, while only RTX 40/50 drivers with Smooth Motion gain anything).
+// KYTY_CUDA_VA_FLOOR_GB: the floor in GiB, default and minimum 1024. The floor must sit above
+// the whole guest range (HOST_USER_MAX + 1 = 1008 GiB): whatever CUDA reserves below it would be a
+// permanent hole in guest VA, and a fixed-address guest mapping there would fail.
 // Without nvcuda.dll (no NVIDIA driver) nothing happens.
 static void InitCudaEarly() {
-	if (const char* value = std::getenv("KYTY_CUDA_EARLY_INIT"); value != nullptr && std::strcmp(value, "0") == 0) {
+	if (const char* value = std::getenv("KYTY_CUDA_EARLY_INIT"); value == nullptr || std::strcmp(value, "1") != 0) {
 		return;
 	}
 	HMODULE cuda = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -683,9 +688,12 @@ static void InitCudaEarly() {
 	if (init == nullptr) {
 		return;
 	}
-	uint64_t floor_gb = 512;
+	// 1024 GiB = 0x100_0000_0000, above HOST_USER_MAX (0xfb_ffff_ffff); the cap keeps the shift sane.
+	constexpr uint64_t MinFloorGb = 1024;
+	constexpr uint64_t MaxFloorGb = 65536;
+	uint64_t           floor_gb   = MinFloorGb;
 	if (const char* value = std::getenv("KYTY_CUDA_VA_FLOOR_GB"); value != nullptr && std::atoi(value) > 0) {
-		floor_gb = static_cast<uint64_t>(std::atoi(value));
+		floor_gb = std::clamp<uint64_t>(static_cast<uint64_t>(std::atoi(value)), MinFloorGb, MaxFloorGb);
 	}
 	const uint64_t floor = floor_gb << 30u;
 	// Hold the free ranges below the floor.
