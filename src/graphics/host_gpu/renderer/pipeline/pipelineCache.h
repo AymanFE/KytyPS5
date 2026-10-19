@@ -212,6 +212,22 @@ public:
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                              const GraphicsPrograms& programs);
+	// KYTY_PIPELINE_SKIP (default off): with `skippable` (the draw only changes the picture), a
+	// pipeline that does not exist yet is built on a background thread and the lookup returns null
+	// until it is there (the draw is skipped), after a short wait (KYTY_PIPELINE_SKIP_WAIT_US).
+	// Otherwise as GetGraphicsPipeline.
+	Pipeline* TryGetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	                                 const RenderDepthInfo&                 depth,
+	                                 std::span<const ShaderVertexInputInfo> vertex_info,
+	                                 CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
+	                                 vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                 const GraphicsPrograms& programs, bool skippable);
+	[[nodiscard]] bool PipelineSkipEnabled() const noexcept { return m_skip != nullptr; }
+	struct SkipTotals {
+		uint64_t requested = 0, published = 0, skipped_draws = 0, ready_in_wait = 0, not_queued = 0;
+		uint64_t compile_ns = 0;
+	};
+	[[nodiscard]] SkipTotals GetSkipTotals() const;
 
 	// Draw-prep binding plans (KYTY_DRAW_PREP_BINDINGS, drawPrep/bindingPlan.h). Everything the
 	// graphics pipeline key takes from a draw's resolved colour and depth targets: the key is a
@@ -431,6 +447,15 @@ private:
 	std::unique_ptr<FastFirstState> m_fast_first;
 	struct PrefetchState;
 	std::unique_ptr<PrefetchState> m_prefetch;
+	// KYTY_PIPELINE_SKIP: the background builder of skipped draws' pipelines (a keyed PrefetchState).
+	std::unique_ptr<PrefetchState> m_skip;
+	uint64_t                       m_skip_wait_ns = 0;
+	std::atomic<uint64_t>          m_skip_draws {0}, m_skip_ready_in_wait {0}, m_skip_not_queued {0};
+	Pipeline* GetGraphicsPipelineImpl(std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+	                                  std::span<const ShaderVertexInputInfo> vertex_info,
+	                                  CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
+	                                  vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                  const GraphicsPrograms& programs, bool skippable);
 	// The 10 s "Pipelines" console line (KYTY_PIPELINE_STATS=1, pipelineStats.h); null when off.
 	struct StatsReporter;
 	std::unique_ptr<StatsReporter> m_stats_reporter;

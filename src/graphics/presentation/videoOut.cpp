@@ -7,6 +7,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/hangTrace.h"
+#include "common/liveSwitch.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -1209,6 +1210,9 @@ bool FlipQueue::IsPending(VideoOutConfig& cfg, int index) {
 	       std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
 }
 
+// KYTY_PRESENT_UNLOCKED (live switch, default off): see FlipQueue::Flip.
+static Live::Switch g_present_unlocked("KYTY_PRESENT_UNLOCKED", Live::ParseDefaultOff);
+
 bool FlipQueue::Flip(uint32_t micros) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
@@ -1245,21 +1249,41 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_mutex.Unlock();
 
 	// Lock each port in bus order, then present and complete the whole group at one Vblank.
+	// KYTY_PRESENT_UNLOCKED=1 (default off): present without the port locks (the frames belong to
+	// the presenter, and a GPU flip of the command processor waits for a port lock while a present
+	// can take milliseconds), then lock the ports again to complete the group. A port closed
+	// meanwhile keeps its requests for Cancel, which waits for this flip.
+	const bool present_unlocked = g_present_unlocked.Get() != 0;
 	std::sort(requests.begin(), requests.begin() + count,
 	          [](const auto& a, const auto& b) { return a.cfg->bus < b.cfg->bus; });
-	bool due = true;
+	const auto lock_ports = [&] {
+		bool current = true;
+		for (size_t i = 0; i < count; i++) {
+			auto& r = requests[i];
+			r.cfg->mutex.Lock();
+			current &= r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation;
+		}
+		return current;
+	};
+	bool due = lock_ports();
 	std::array<Graphics::Presenter::Layer, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> layers {};
 	for (size_t i = 0; i < count; i++) {
 		auto& r = requests[i];
-		r.cfg->mutex.Lock();
-		due &= r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation;
 		if (r.id == group) {
 			due &= IsFlipDueLocked(*r.cfg, r.generation);
 		}
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
 	if (due) {
+		if (present_unlocked) {
+			for (size_t i = count; i != 0; i--) {
+				requests[i - 1].cfg->mutex.Unlock();
+			}
+		}
 		m_presenter.Present(std::span(layers.data(), count));
+		if (present_unlocked) {
+			due = lock_ports();
+		}
 	}
 
 	m_mutex.Lock();

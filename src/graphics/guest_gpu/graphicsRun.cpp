@@ -4512,6 +4512,13 @@ bool CommandProcessor::CpWriteRange(CpSeq::OpKind kind, const void* payload, uin
 	return true;
 }
 
+// KYTY_CP_WAIT_JOURNAL (live switch; thread mode without the verifier). Read by the sequencer at
+// each wait: either answer is valid at any wait.
+static Live::Switch g_cp_wait_journal("KYTY_CP_WAIT_JOURNAL", Live::ParseDefaultOff);
+static bool WaitJournalEnabled() {
+	return g_cp_wait_journal.Get() != 0 && CpSeq::VerifyMode() == 0;
+}
+
 CpSeq::Result CommandProcessor::SubmitThread(CpSeq::OpKind kind, const void* payload,
                                              uint32_t payload_size, const void* data,
                                              uint32_t data_size) {
@@ -4587,6 +4594,23 @@ CpSeq::Result CommandProcessor::SubmitThread(CpSeq::OpKind kind, const void* pay
 			Profiler::CountFrameEvent(Profiler::FrameEvent::CpSeqBarrierCondition);
 			break;
 		default: break;
+	}
+	// KYTY_CP_WAIT_JOURNAL=1 (default off): a WAIT_REG_MEM on the label this stream just wrote,
+	// with no other CP write since, whose written value passes the compare, is answered from that
+	// pending write instead of stopping the parse: the resolver executes the wait in order (it
+	// suspends there itself if the label is late), and the front keeps parsing, so its draws reach
+	// the draw-prep window while the resolver catches up. The front's own guest reads stay ordered
+	// (pending CP writes and GPU-touched bytes are read by the resolver in order). Thread mode only.
+	if (kind == CpSeq::OpKind::WaitRegMem && WaitJournalEnabled() &&
+	    IsSelfLabelWait(*static_cast<const CpSeq::WaitRegMemOp*>(payload))) {
+		static std::atomic<uint64_t> passed {0};
+		const auto count = passed.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count == 1 || (count & 0xffffu) == 0) {
+			std::printf("CP wait journal: %" PRIu64 " self-label waits passed without stopping the parse\n",
+			            count);
+		}
+		m_adopt_tracking = false;
+		return {false, 0};
 	}
 	// P3c (KYTY_CP_SEQ_PREFETCH): at a wait on the label this stream just wrote, parse ahead on a
 	// copy of the front while the resolver catches up, publishing the draws it meets.

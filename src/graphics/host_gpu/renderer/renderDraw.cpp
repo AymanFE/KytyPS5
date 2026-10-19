@@ -2291,6 +2291,38 @@ static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInf
 	return true;
 }
 
+// KYTY_PIPELINE_SKIP: whether a draw may be skipped while the driver builds its new pipeline
+// because the picture is all it changes: no stage writes guest memory or images (DrawRunProgramEligible),
+// no guest occlusion query counts its samples, it clears no depth or stencil, it is no mesh draw,
+// and it renders to tiled images only (the CPU reads linear ones back).
+static bool DrawOnlyChangesPicture(RenderContext& context, const DrawRenderState& state,
+                                   std::span<const ShaderVertexInputInfo> vertex_stages, bool mesh_active) {
+	if (mesh_active || vertex_stages.size() != 1 || context.GetOcclusionCounter().Active()) {
+		return false;
+	}
+	for (const auto& stage: vertex_stages) {
+		if (stage.stage.program == nullptr || !DrawRunProgramEligible(*stage.stage.program)) {
+			return false;
+		}
+	}
+	if (state.ps_active && (state.ps_input_info.stage.program == nullptr ||
+	                        !DrawRunProgramEligible(*state.ps_input_info.stage.program))) {
+		return false;
+	}
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (!state.color_info[i].desc.info.IsTiled()) {
+			return false;
+		}
+	}
+	const auto& depth = state.depth_info;
+	if (static_cast<bool>(depth.image_id) &&
+	    (!depth.desc.info.IsTiled() || depth.depth_clear_enable || depth.depth_load_clear_enable ||
+	     depth.stencil_clear_enable)) {
+		return false;
+	}
+	return true;
+}
+
 void RenderExecutor::BeginDrawRun() {
 	m_run_prev_valid     = m_run.valid;
 	m_run_keepable       = m_run.valid;
@@ -4002,9 +4034,23 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (planned_pipeline != nullptr && !plan_verify) {
 		pipeline_cache.NotePlannedPipeline(state.depth_info, ps_input);
 	} else {
-		pipeline_object = &pipeline_cache.GetGraphicsPipeline(
+		const bool skippable = planned_pipeline == nullptr && pipeline_cache.PipelineSkipEnabled() &&
+		                       DrawOnlyChangesPicture(m_context, state, vertex_stages, mesh_active);
+		pipeline_object = pipeline_cache.TryGetGraphicsPipeline(
 		    colors_span, state.depth_info, vertex_stages, buffer, ps_input, topology,
-		    primitive_restart_enable, *programs);
+		    primitive_restart_enable, *programs, skippable);
+		if (pipeline_object == nullptr) {
+			// KYTY_PIPELINE_SKIP: skipped until its pipeline is built. Nothing was recorded; no
+			// draw-run record may be continued or recalled across it (its bindings replaced the
+			// record's).
+			m_run.valid        = false;
+			m_run_active       = false;
+			m_run_targets_kept = false;
+			for (auto& record: m_run_kept) {
+				record.valid = false;
+			}
+			return;
+		}
 		if (planned_pipeline != nullptr) {
 			DrawPrep::CountBindingVerifyCheck();
 			// A pipeline replaced after the certificate check is a race, not a difference.
