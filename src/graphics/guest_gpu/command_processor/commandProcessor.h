@@ -397,6 +397,8 @@ private:
 	[[nodiscard]] bool TryDeferLabel(void* dst, uint64_t value, uint32_t size, bool interrupt,
 	                                 uint32_t interrupt_context_id,
 	                                 uint32_t timestamp_slot = UINT32_MAX);
+	// A flip's label in completion/split label mode (KYTY_LABEL_SPLIT_FLIPS). False: write it now.
+	[[nodiscard]] bool DeferFlipLabel(void* dst, uint32_t value, bool interrupt);
 	// KYTY_EOP_TIMESTAMPS=gpu, at an end-of-pipe clock write (a fence: the draw-prep window is
 	// empty): publishes the completed timestamps, then records a query at this point. Returns its
 	// slot, or UINT32_MAX in record mode or without a free slot.

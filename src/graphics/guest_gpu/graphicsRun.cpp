@@ -498,6 +498,20 @@ void GuestGpu::DropCpVisibleLabels(uint64_t address, uint64_t size) {
 	}
 }
 
+bool GuestGpu::CpVisibleLabelOverlaps(uint64_t address, uint64_t size) {
+	if (!m_cp_visible_labels.load(std::memory_order_relaxed) || !HasDeferredLabels()) {
+		return false;
+	}
+	Common::LockGuard lock(m_queue_mutex);
+	for (const auto& label: m_deferred_labels) {
+		if (label.cp_visible && label.address < address + size &&
+		    address < label.address + label.size) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void GuestGpu::NoteCpVisibleLabelsWaited(uint64_t address, uint64_t size) {
 	Common::LockGuard lock(m_queue_mutex);
 	for (auto& label: m_deferred_labels) {
@@ -1174,6 +1188,44 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	(void)Submit(op, src, dw_num * static_cast<uint32_t>(sizeof(uint32_t)));
 }
 
+static bool LabelSplitMode();
+static bool LabelCompletionMode();
+
+// Diagnostic (Bug C): KYTY_CP_AHEAD_LOG=1 counts command-processor writes the guest CPU can see at
+// once (CPU writes at record time) made while deferred labels are pending, i.e. while the CP may be
+// ahead of the GPU in split mode; prints the first 32 addresses per kind and totals every 1000.
+enum class CpAheadKind : uint32_t { WriteData, WriteDataDeferred, FlipLabel, FlipLabelDeferred, Count };
+static void NoteCpAhead(CpAheadKind kind, uint64_t address, uint64_t value) {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_CP_AHEAD_LOG");
+		return v != nullptr && std::strcmp(v, "1") == 0;
+	}();
+	if (!enabled) {
+		return;
+	}
+	static const char*           names[] = {"write-data", "write-data-deferred", "flip-label",
+	                                        "flip-label-deferred"};
+	static std::atomic<uint64_t> counts[static_cast<uint32_t>(CpAheadKind::Count)] {};
+	const auto                   k = static_cast<uint32_t>(kind);
+	const auto                   n = counts[k].fetch_add(1, std::memory_order_relaxed) + 1;
+	if (n <= 32 || (n % 1000) == 0) {
+		std::printf("Kyty cp-ahead %s #%" PRIu64 " 0x%" PRIx64 " value 0x%" PRIx64 "\n", names[k], n,
+		            address, value);
+	}
+}
+
+// KYTY_LABEL_MODE=split: a CPU write-data to a label that is still pending (its guest write waits
+// for completion) is deferred behind it, so the guest sees the label, then this write, in
+// hardware order and not before the GPU got there. KYTY_LABEL_SPLIT_WRITE_DATA=0: written at once
+// (the pending label's write is then skipped if a CP wait passed on it).
+static bool SplitWriteDataDeferred() {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_LABEL_SPLIT_WRITE_DATA");
+		return LabelSplitMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+	}();
+	return enabled;
+}
+
 void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_t* src) {
 	auto*          dst           = reinterpret_cast<uint32_t*>(op.dst);
 	const uint32_t dw_num        = op.dw_num;
@@ -1221,6 +1273,26 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 			             uint64_t {dw_num} * 4u);
 			return;
 		}
+	}
+	const uint64_t cpu_bytes = write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u;
+	if (g_gpu_state != nullptr && g_gpu_state->HasDeferredLabels()) {
+		if (cpu_bytes <= sizeof(uint64_t) && SplitWriteDataDeferred() &&
+		    g_gpu_state->CpVisibleLabelOverlaps(op.dst, cpu_bytes)) {
+			uint64_t value = 0;
+			std::memcpy(&value, write_one_address ? src + (dw_num - 1u) : src, cpu_bytes);
+			NoteCpAhead(CpAheadKind::WriteDataDeferred, op.dst, value);
+			const bool proxy   = m_defer_next_label;
+			m_defer_next_label = false;
+			const bool deferred =
+			    TryDeferLabel(dst, value, static_cast<uint32_t>(cpu_bytes), false, 0);
+			m_defer_next_label = proxy;
+			if (deferred) {
+				Profiler::CountFrameEvent(Profiler::FrameEvent::WriteDataCpu);
+				TraceCpLabel("wd-deferred", dst, value, cpu_bytes);
+				return;
+			}
+		}
+		NoteCpAhead(CpAheadKind::WriteData, op.dst, src[write_one_address ? dw_num - 1u : 0u]);
 	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::WriteDataCpu);
 	TraceCpLabel("wd-cpu", dst, src[write_one_address ? dw_num - 1u : 0u], uint64_t {dw_num} * 4u);
@@ -3562,6 +3634,29 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				                      label_clock)) {
 					return; // the deferred label raises the interrupt after its write
 				}
+				// KYTY_LABEL_MODE=completion/split: deferred label writes run on the GPU thread, so
+				// an interrupt-only end-of-pipe event goes there too, after the labels before it
+				// (it could wake the guest before they were visible). KYTY_LABEL_ORDERED_INTERRUPTS=0.
+				static const bool ordered_interrupts = [] {
+					const auto* v = std::getenv("KYTY_LABEL_ORDERED_INTERRUPTS");
+					return LabelCompletionMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+				}();
+				if (ordered_interrupts) {
+					auto*     renderer = &m_renderer;
+					auto&     gpu      = m_renderer.GetGpu();
+					const int event_id = m_interrupt_event_id;
+					const auto ctx     = interrupt_context_id;
+					GetScheduler().DeferPriorityOperation(
+					    [renderer, &gpu, event_id, ctx] {
+						    if (!gpu.TrySendCommand([renderer, event_id, ctx] {
+							        renderer->TriggerInterrupt(event_id, ctx);
+						        })) {
+							    renderer->TriggerInterrupt(event_id, ctx);
+						    }
+					    },
+					    CommandScheduler::PriorityOperationKind::EopInterrupt);
+					return;
+				}
 				Sync::TriggerEopEventAtEndOfPipe(command, m_interrupt_event_id,
 				                                 interrupt_context_id);
 				return;
@@ -3982,7 +4077,10 @@ void CommandProcessor::ExecEventWrite(const CpSeq::EventWriteOp& op) {
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}
-			NoteCpWrite(event_address, 16u * 2u * sizeof(uint64_t));
+			// The bytes written: 16 slots 16 bytes apart. Not 256: an end dump sits 8 bytes into its
+			// pair block, and 256 bytes from it covers the label the game keeps right after the
+			// block, which split label mode then took for overwritten and skipped its write.
+			NoteCpWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
 			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 			break;
 		}
@@ -4111,6 +4209,29 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	                         eop_event_type, cache_action));
 }
 
+// KYTY_LABEL_MODE=completion/split: a flip's end-of-pipe label is written at completion like any
+// other label (it was written at record time). KYTY_LABEL_SPLIT_FLIPS=0 restores that.
+bool CommandProcessor::DeferFlipLabel(void* dst, uint32_t value, bool interrupt) {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_LABEL_SPLIT_FLIPS");
+		return LabelCompletionMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+	}();
+	if (!enabled || dst == nullptr) {
+		return false;
+	}
+	static std::once_flag once;
+	std::call_once(once, [interrupt] {
+		std::printf("Kyty end-of-pipe labels: flip labels written at completion (%s)\n",
+		            interrupt ? "with interrupt" : "plain");
+	});
+	NoteCpAhead(CpAheadKind::FlipLabelDeferred, reinterpret_cast<uint64_t>(dst), value);
+	const bool proxy   = m_defer_next_label;
+	m_defer_next_label = false;
+	const bool deferred = TryDeferLabel(dst, value, sizeof(value), interrupt, 0);
+	m_defer_next_label  = proxy;
+	return deferred;
+}
+
 void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 	g_gpu_timestamp_anchor.store(Sync::ReadReferenceClock(), std::memory_order_relaxed);
 	const FlipInfo flip {.handle    = op.handle,
@@ -4148,8 +4269,10 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 				     reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 			}
 
-			std::memcpy(dst_gpu_addr, &value, sizeof(value));
-			NoteCpWrite(op.dst, sizeof(value));
+			if (!DeferFlipLabel(dst_gpu_addr, value, false)) {
+				std::memcpy(dst_gpu_addr, &value, sizeof(value));
+				NoteCpWrite(op.dst, sizeof(value));
+			}
 			auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,
 			                                         flip.flip_mode, flip.flip_arg);
 			Sync::WriteAtEndOfPipeWithFlip32(m_submit_id, command,
@@ -4179,6 +4302,18 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 
 			if (eop_event_type != 0x00000004 || cache_action != 0x00000038) {
 				EXIT("unknown event type\n");
+			}
+			if (DeferFlipLabel(dst_gpu_addr, value, true)) {
+				// The deferred label raises the flip's interrupt after its write.
+				auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,
+				                                         flip.flip_mode, flip.flip_arg);
+				Sync::WriteAtEndOfPipeWithFlip32(m_submit_id, command,
+				                                 static_cast<uint32_t*>(dst_gpu_addr), value,
+				                                 flip.handle, flip.index, flip.flip_mode,
+				                                 flip.flip_arg, request);
+				GetScheduler().Flush();
+				Live::OnCpFlip(); Libs::Graphics::PageManager::NoteCpFlip();
+				return;
 			}
 			std::memcpy(dst_gpu_addr, &value, sizeof(value));
 			NoteCpWrite(op.dst, sizeof(value));

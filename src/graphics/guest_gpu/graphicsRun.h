@@ -79,6 +79,8 @@ public:
 	void DropCpVisibleLabels(uint64_t address, uint64_t size);
 	// The pending label (address, tick) was replaced by a later CP write (DropCpVisibleLabels).
 	[[nodiscard]] bool DeferredLabelSuperseded(uint64_t address, uint64_t tick);
+	// A pending CP-visible label overlaps [address, address + size) (KYTY_LABEL_MODE=split).
+	[[nodiscard]] bool CpVisibleLabelOverlaps(uint64_t address, uint64_t size);
 
 private:
 	struct DeferredLabel {
