@@ -583,7 +583,8 @@ bool OcclusionCounter::PriorityPublication() {
 	static const bool enabled = [] {
 		const auto* label_mode = std::getenv("KYTY_LABEL_MODE");
 		return GetProxyMode() == ProxyMode::DeferLabel ||
-		       (label_mode != nullptr && std::strcmp(label_mode, "completion") == 0);
+		       (label_mode != nullptr && (std::strcmp(label_mode, "completion") == 0 ||
+		                                  std::strcmp(label_mode, "split") == 0));
 	}();
 	return enabled;
 }
