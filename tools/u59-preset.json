@@ -22,7 +22,7 @@
   "KYTY_HOST_INPUT_ONLY": "0",
   "KYTY_IMAGE_CACHE_POLICY": "legacy",
   "KYTY_IMAGE_LOOKUP": "fast",
-  "KYTY_LABEL_MODE": "record",
+  "KYTY_LABEL_MODE": "split",
   "KYTY_LOD_STATS_MODE": "gpu",
   "KYTY_MESH_RESTART": "1",
   "KYTY_NATIVE_IMAGE_POOL": "1",
