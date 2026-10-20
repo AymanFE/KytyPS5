@@ -121,7 +121,7 @@ std::vector<uint8_t> CodegenFingerprint() {
 		b.Text("branchless_lds");
 	}
 	if (options.cfg_clone_exits) {
-		b.Text("cfg_clone_exits");
+		b.Text("cfg_clone_exits2"); // 2: MergeIgnoringReturnArms
 	}
 	if (options.lane_local) {
 		b.Text("lane_local");
