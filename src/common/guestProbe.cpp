@@ -9,6 +9,8 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <deque>
 #include <vector>
 
 #include <fmt/format.h>
@@ -30,11 +32,17 @@ struct MemSpec {
 	uint64_t off    = 0;
 	bool     deref  = false;
 	uint64_t off2   = 0;
+	std::vector<uint64_t> chain; // further '*<off>' levels after off2
 	uint64_t length = 0x40;
 	bool     condition = false; // '!' prefix: log only when these bytes are not all zero
 	bool     write     = false; // '=' prefix: store the 8-byte value <len> at the address (experiments)
 	bool     watch     = false; // '&' prefix: at the first matched hit, a hardware write watch (8 bytes)
+	bool     equals    = false; // '?' prefix: a condition; the 8 bytes there must equal `value`
+	uint64_t value     = 0;
 };
+
+// (*(u64*)at) + off2, then (*(u64*)that) + each chain offset; 0 when a level is unreadable.
+uint64_t Deref(const MemSpec& m, uint64_t at);
 
 struct Probe {
 	uint64_t             va       = 0;
@@ -45,6 +53,10 @@ struct Probe {
 	uint8_t              original = 0;
 	bool                 armed    = false;
 	bool                 deferred = false; // '^' prefix: armed by ArmDeferred()
+	// '~' prefix: never retires; keeps the last <hits> matched lines in a ring that ArmDeferred()
+	// prints once (the hits leading up to the event that armed the deferred probes).
+	bool                    ring = false;
+	std::deque<std::string> ring_lines;
 	std::vector<MemSpec> mem;
 };
 
@@ -95,6 +107,20 @@ bool Readable(uint64_t address, uint64_t size) {
 	return true;
 }
 
+uint64_t Deref(const MemSpec& m, uint64_t at) {
+	if (!Readable(at, 8)) {
+		return 0;
+	}
+	at = *reinterpret_cast<const uint64_t*>(at) + m.off2;
+	for (auto o: m.chain) {
+		if (!Readable(at, 8)) {
+			return 0;
+		}
+		at = *reinterpret_cast<const uint64_t*>(at) + o;
+	}
+	return at;
+}
+
 void WriteByte(uint64_t address, uint8_t value) {
 	DWORD old = 0;
 	VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old);
@@ -130,8 +156,15 @@ std::string Describe(const Probe& probe, const CONTEXT& c) {
 				line += fmt::format(" [{}]=unreadable", what);
 				continue;
 			}
-			address = *reinterpret_cast<const uint64_t*>(address) + m.off2;
+			address = Deref(m, address);
 			what += fmt::format("*{:x}", m.off2);
+			for (auto o: m.chain) {
+				what += fmt::format("*{:x}", o);
+			}
+			if (address == 0) {
+				line += fmt::format(" [{}]=unreadable", what);
+				continue;
+			}
 		}
 		line += fmt::format(" mem({}@{:x})=", what, address);
 		if (!Readable(address, m.length)) {
@@ -153,9 +186,67 @@ std::string Describe(const Probe& probe, const CONTEXT& c) {
 std::atomic<uint64_t> g_watch_address {0};
 std::atomic<uint32_t> g_watch_logged {0};
 
+// KYTY_LABEL_READ_WATCH (diagnostic): hardware read/write watches (DR0-DR3, 8 bytes) on up to four
+// guest addresses; hits are counted per (watch, pc) and summarised by a background thread.
+struct ReadWatchHit {
+	std::atomic<uint64_t> key {0}; // (index + 1) << 56 | pc
+	std::atomic<uint64_t> count {0};
+	uint64_t              tid   = 0;
+	uint64_t              value = 0;
+	uint64_t              ret   = 0;
+	uint64_t              printed = 0;
+};
+constexpr uint32_t    kReadWatchSlots = 512;
+ReadWatchHit          g_read_hits[kReadWatchSlots];
+std::atomic<bool>     g_read_watch_on {false};
+uint64_t              g_read_watch[4] = {};
+uint32_t              g_read_watch_count = 0;
+std::atomic<uint64_t> g_read_watch_overflow {0};
+uint64_t              g_size = 0;
+
+void RecordReadWatch(uint32_t index, const CONTEXT& c) {
+	const uint64_t key  = (uint64_t {index} + 1u) << 56u | (c.Rip & ((uint64_t {1} << 56u) - 1u));
+	uint32_t       slot = static_cast<uint32_t>((c.Rip * 0x9E3779B97F4A7C15ull) >> 55u) % kReadWatchSlots;
+	for (uint32_t probe = 0; probe < kReadWatchSlots; probe++, slot = (slot + 1) % kReadWatchSlots) {
+		auto&    hit      = g_read_hits[slot];
+		uint64_t expected = 0;
+		if (hit.key.load(std::memory_order_acquire) == key ||
+		    (hit.key.load(std::memory_order_relaxed) == 0 &&
+		     hit.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel))) {
+			if (hit.count.fetch_add(1, std::memory_order_relaxed) == 0) {
+				hit.tid   = GetCurrentThreadId();
+				hit.value = *reinterpret_cast<const volatile uint64_t*>(g_read_watch[index]);
+				uint64_t ret = 0;
+				if (c.Rbp != 0 && Readable(c.Rbp + 8, 8)) {
+					ret = *reinterpret_cast<const uint64_t*>(c.Rbp + 8);
+				}
+				hit.ret = ret;
+			}
+			return;
+		}
+		if (expected == key) {
+			hit.count.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
+	g_read_watch_overflow.fetch_add(1, std::memory_order_relaxed);
+}
+
 LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 	const auto code = e->ExceptionRecord->ExceptionCode;
 	auto&      c    = *e->ContextRecord;
+	if (code == EXCEPTION_SINGLE_STEP && g_read_watch_on.load(std::memory_order_relaxed) &&
+	    (c.Dr6 & 0xfu) != 0) {
+		for (uint32_t i = 0; i < g_read_watch_count; i++) {
+			if ((c.Dr6 & (1u << i)) != 0) {
+				RecordReadWatch(i, c);
+			}
+		}
+		c.Dr6 &= ~uint64_t {0xf};
+		if (t_rearm == nullptr) {
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+	}
 	if (code == EXCEPTION_SINGLE_STEP && (c.Dr6 & 1u) != 0 && g_watch_address.load() != 0) {
 		const auto watch = g_watch_address.load();
 		c.Dr6 &= ~uint64_t {0xf};
@@ -189,7 +280,7 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 		}
 		t_rearm = nullptr;
 		std::scoped_lock lock(g_mutex);
-		if (probe->hits < probe->max_hits) {
+		if (probe->ring || probe->hits < probe->max_hits) {
 			WriteByte(probe->address, 0xcc);
 		} else {
 			probe->armed = false;
@@ -211,17 +302,35 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 			}
 		}
 		if (probe == nullptr) {
+			// A thread that executed a probe's int3 just before another thread retired the probe
+			// (its last hit restored the original byte and cleared `armed`) arrives here late. The
+			// breakpoint is not this thread's to report: run the restored instruction.
+			for (const auto& p: g_probes) {
+				if (p.address == address && *reinterpret_cast<const volatile uint8_t*>(address) != 0xcc) {
+					c.Rip = address;
+					return EXCEPTION_CONTINUE_EXECUTION;
+				}
+			}
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 		probe->passes++;
 		bool matched = true;
 		for (const auto& m: probe->mem) {
+			if (m.equals) {
+				uint64_t at = RegValue(c, m.reg) + m.off;
+				if (m.deref) {
+					at = Deref(m, at);
+				}
+				matched = matched && at != 0 && Readable(at, 8) &&
+				          *reinterpret_cast<const uint64_t*>(at) == m.value;
+				continue;
+			}
 			if (!m.condition) {
 				continue;
 			}
 			uint64_t at = RegValue(c, m.reg) + m.off;
 			if (m.deref) {
-				at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+				at = Deref(m, at);
 			}
 			bool nonzero = false;
 			if (at != 0 && Readable(at, m.length)) {
@@ -233,14 +342,23 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 		}
 		if (matched) {
 			probe->hits++;
-			if (probe->hits <= probe->max_hits) {
+			if (probe->ring) {
+				auto entry = Describe(*probe, c);
+				if (entry.empty() || entry.back() != '\n') {
+					entry += '\n';
+				}
+				probe->ring_lines.push_back(std::move(entry));
+				if (probe->ring_lines.size() > probe->max_hits) {
+					probe->ring_lines.pop_front();
+				}
+			} else if (probe->hits <= probe->max_hits) {
 				line = Describe(*probe, c);
 			}
 			for (const auto& m: probe->mem) {
 				if (m.watch && g_watch_address.load() == 0 && new_watch == 0) {
 					uint64_t at = RegValue(c, m.reg) + m.off;
 					if (m.deref) {
-						at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+						at = Deref(m, at);
 					}
 					new_watch = at;
 				}
@@ -249,14 +367,14 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 				}
 				uint64_t at = RegValue(c, m.reg) + m.off;
 				if (m.deref) {
-					at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+					at = Deref(m, at);
 				}
 				if (at != 0 && Readable(at, 8)) {
 					*reinterpret_cast<uint64_t*>(at) = m.length;
 				}
 			}
 		}
-		if ((probe->passes % 1000u) == 0u) {
+		if (!probe->ring && (probe->passes % 1000u) == 0u) {
 			line += fmt::format("GuestProbe: 0x{:x} passes {}, logged {}\n", probe->va,
 			                    probe->passes, probe->hits);
 		}
@@ -309,6 +427,136 @@ uint64_t Hex(std::string_view text) {
 	return std::strtoull(std::string(text).c_str(), nullptr, 16);
 }
 
+std::once_flag g_handler_once;
+
+void InstallHandler() {
+	std::call_once(g_handler_once, [] { AddVectoredExceptionHandler(1, Handler); });
+}
+
+// Sets DR0-DR3 to the read watches on every thread of the process except the caller.
+uint32_t ArmReadWatchesOnThreads() {
+	uint64_t dr7 = 0;
+	for (uint32_t i = 0; i < g_read_watch_count; i++) {
+		// Li enable, RWi = 11 (read or write), LENi = 10 (8 bytes)
+		dr7 |= (uint64_t {1} << (2u * i)) | (uint64_t {0xb} << (16u + 4u * i));
+	}
+	const DWORD self  = GetCurrentThreadId();
+	uint32_t    armed = 0;
+	HANDLE      snap  = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE) {
+		return 0;
+	}
+	THREADENTRY32 entry {};
+	entry.dwSize = sizeof(entry);
+	for (BOOL ok = Thread32First(snap, &entry); ok; ok = Thread32Next(snap, &entry)) {
+		if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) {
+			continue;
+		}
+		HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME,
+		                           FALSE, entry.th32ThreadID);
+		if (thread == nullptr) {
+			continue;
+		}
+		if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+			CONTEXT ctx {};
+			ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+			if (GetThreadContext(thread, &ctx) != 0) {
+				ctx.Dr0 = g_read_watch[0];
+				ctx.Dr1 = g_read_watch[1];
+				ctx.Dr2 = g_read_watch[2];
+				ctx.Dr3 = g_read_watch[3];
+				ctx.Dr7 = (ctx.Dr7 & ~uint64_t {0xffff00ff}) | dr7;
+				if (SetThreadContext(thread, &ctx) != 0) {
+					armed++;
+				}
+			}
+			ResumeThread(thread);
+		}
+		CloseHandle(thread);
+	}
+	CloseHandle(snap);
+	return armed;
+}
+
+std::string ThreadName(uint64_t tid) {
+	std::string name;
+	HANDLE      thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(tid));
+	if (thread == nullptr) {
+		return name;
+	}
+	PWSTR text = nullptr;
+	if (SUCCEEDED(GetThreadDescription(thread, &text)) && text != nullptr) {
+		for (const wchar_t* w = text; *w != 0; w++) {
+			name += *w < 128 ? static_cast<char>(*w) : '?';
+		}
+		LocalFree(text);
+	}
+	CloseHandle(thread);
+	return name;
+}
+
+uint64_t Relative(uint64_t pc) {
+	return pc >= g_base && pc < g_base + g_size ? pc - g_base : pc;
+}
+
+// KYTY_LABEL_READ_WATCH=<hex addr>[,<hex addr>...] (at most 4): after
+// KYTY_LABEL_READ_WATCH_DELAY_S seconds (default 30) hardware read/write watches on those guest
+// addresses on every thread (re-armed every 10 s for new threads); every 10 s one
+// "LabelWatch:" line per (address, pc) with new hits: count, thread, first value seen, [rbp+8].
+void StartLabelReadWatch() {
+	const char* env = std::getenv("KYTY_LABEL_READ_WATCH");
+	if (env == nullptr || *env == '\0') {
+		return;
+	}
+	for (auto part: Split(env, ',')) {
+		if (g_read_watch_count < 4) {
+			g_read_watch[g_read_watch_count++] = Hex(part) & ~uint64_t {7};
+		}
+	}
+	const char* delay_env = std::getenv("KYTY_LABEL_READ_WATCH_DELAY_S");
+	const auto  delay     = delay_env != nullptr ? std::strtoul(delay_env, nullptr, 10) : 30ul;
+	InstallHandler();
+	std::thread([delay] {
+		Sleep(static_cast<DWORD>(delay * 1000u));
+		g_read_watch_on.store(true);
+		uint32_t round = 0;
+		for (;;) {
+			const auto armed = ArmReadWatchesOnThreads();
+			if (round == 0) {
+				std::string line = fmt::format("LabelWatch: armed on {} threads:", armed);
+				for (uint32_t i = 0; i < g_read_watch_count; i++) {
+					line += fmt::format(" dr{}=0x{:x}", i, g_read_watch[i]);
+				}
+				Log::WriteToConsoleAndLog(line + "\n");
+			}
+			round++;
+			Sleep(10000);
+			std::string text;
+			for (auto& hit: g_read_hits) {
+				const auto key   = hit.key.load(std::memory_order_acquire);
+				const auto count = hit.count.load(std::memory_order_relaxed);
+				if (key == 0 || count == hit.printed) {
+					continue;
+				}
+				const uint32_t index = static_cast<uint32_t>(key >> 56u) - 1u;
+				const uint64_t pc    = key & ((uint64_t {1} << 56u) - 1u);
+				text += fmt::format("LabelWatch: t{} 0x{:x} pc {:x} n={} (+{}) tid {} '{}' first={:x} "
+				                    "[rbp+8]={:x}\n",
+				                    round * 10, g_read_watch[index], Relative(pc), count,
+				                    count - hit.printed, hit.tid, ThreadName(hit.tid), hit.value,
+				                    Relative(hit.ret));
+				hit.printed = count;
+			}
+			if (const auto lost = g_read_watch_overflow.load(); lost != 0) {
+				text += fmt::format("LabelWatch: {} hits not counted (table full)\n", lost);
+			}
+			if (!text.empty()) {
+				Log::WriteToConsoleAndLog(text);
+			}
+		}
+	}).detach();
+}
+
 } // namespace
 
 void Arm(uint64_t base, uint64_t size) {
@@ -316,6 +564,8 @@ void Arm(uint64_t base, uint64_t size) {
 		return;
 	}
 	g_base          = base;
+	g_size          = size;
+	StartLabelReadWatch();
 	const char* env = std::getenv("KYTY_GUEST_PROBE");
 	if (env == nullptr || *env == '\0') {
 		return;
@@ -359,6 +609,10 @@ void Arm(uint64_t base, uint64_t size) {
 			probe.deferred = true;
 			head           = head.substr(1);
 		}
+		if (!head.empty() && head[0] == '~') {
+			probe.ring = true;
+			head       = head.substr(1);
+		}
 		if (const auto at = head.find('@'); at != head.npos) {
 			probe.max_hits = static_cast<uint32_t>(std::strtoul(std::string(head.substr(at + 1)).c_str(), nullptr, 10));
 			head           = head.substr(0, at);
@@ -379,13 +633,29 @@ void Arm(uint64_t base, uint64_t size) {
 				m.write = true;
 				f       = f.substr(1);
 			}
+			if (!f.empty() && f[0] == '?') {
+				m.equals = true;
+				m.length = 8;
+				f        = f.substr(1);
+				if (const auto eq = f.find('='); eq != f.npos) {
+					m.value = Hex(f.substr(eq + 1));
+					f       = f.substr(0, eq);
+				}
+			}
 			if (const auto colon = f.find(':'); colon != f.npos) {
 				m.length = Hex(f.substr(colon + 1));
 				f        = f.substr(0, colon);
 			}
 			if (const auto star = f.find('*'); star != f.npos) {
 				m.deref = true;
-				m.off2  = Hex(f.substr(star + 1));
+				auto rest = f.substr(star + 1);
+				auto next = rest.find('*');
+				m.off2    = Hex(rest.substr(0, next));
+				while (next != rest.npos) {
+					rest = rest.substr(next + 1);
+					next = rest.find('*');
+					m.chain.push_back(Hex(rest.substr(0, next)));
+				}
 				f       = f.substr(0, star);
 			}
 			const auto sign = f.find_first_of("+-");
@@ -410,9 +680,13 @@ void Arm(uint64_t base, uint64_t size) {
 	if (g_probes.empty()) {
 		return;
 	}
-	AddVectoredExceptionHandler(1, Handler);
+	InstallHandler();
+	// Every probe's original byte first: a deferred probe at the address of an armed one would
+	// otherwise record the armed probe's int3 and restore it when it retires.
 	for (auto& p: g_probes) {
 		p.original = *reinterpret_cast<const uint8_t*>(p.address);
+	}
+	for (auto& p: g_probes) {
 		if (p.deferred) {
 			Log::WriteToConsoleAndLog(fmt::format(
 			    "GuestProbe: deferred 0x{:x} ({} hits, {} dumps; armed by ArmDeferred)\n", p.va,
@@ -430,6 +704,19 @@ void Arm(uint64_t base, uint64_t size) {
 void ArmDeferred(const char* reason) {
 	std::scoped_lock lock(g_mutex);
 	for (auto& p: g_probes) {
+		if (p.ring && p.armed) {
+			std::string text = fmt::format("GuestProbe: ring 0x{:x}, last {} of {} hits ({}):\n", p.va,
+			                               p.ring_lines.size(), p.hits, reason != nullptr ? reason : "");
+			for (const auto& l: p.ring_lines) {
+				text += l;
+			}
+			Log::WriteToConsoleAndLog(text);
+			p.ring_lines.clear();
+			p.max_hits = 0;
+			p.ring     = false;
+		}
+	}
+	for (auto& p: g_probes) {
 		if (!p.deferred || p.armed || p.hits != 0) {
 			continue;
 		}
@@ -444,8 +731,7 @@ void ArmWriteWatch(uint64_t address) {
 	if (address == 0 || g_watch_address.exchange(address) != 0) {
 		return;
 	}
-	static std::once_flag handler_once;
-	std::call_once(handler_once, [] { AddVectoredExceptionHandler(1, Handler); });
+	InstallHandler();
 	const DWORD self  = GetCurrentThreadId();
 	uint32_t    armed = 0;
 	HANDLE      snap  = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);

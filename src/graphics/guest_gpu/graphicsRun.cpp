@@ -63,6 +63,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <xxhash.h>
 
@@ -401,9 +402,13 @@ bool GuestGpu::FrameFencePassed(const Submission& submission) const {
 	        CpNowNs() - submission.fence_hold_ns > FrameFenceTimeoutNs);
 }
 
-void GuestGpu::AddDeferredLabel(uint64_t address, uint32_t size, uint64_t tick) {
+void GuestGpu::AddDeferredLabel(uint64_t address, uint32_t size, uint64_t tick, uint64_t value,
+                                bool cp_visible) {
 	Common::LockGuard lock(m_queue_mutex);
-	m_deferred_labels.push_back({address, size, tick});
+	m_deferred_labels.push_back({address, size, tick, value, cp_visible && size <= sizeof(value)});
+	if (cp_visible) {
+		m_cp_visible_labels.store(true, std::memory_order_relaxed);
+	}
 	HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, 0, size);
 	m_deferred_label_count.store(static_cast<uint32_t>(m_deferred_labels.size()),
 	                             std::memory_order_release);
@@ -441,6 +446,73 @@ uint64_t GuestGpu::DeferredLabelTick(uint64_t address, uint64_t size) {
 		}
 	}
 	return tick;
+}
+
+bool GuestGpu::DeferredLabelSuperseded(uint64_t address, uint64_t tick) {
+	if (!m_cp_visible_labels.load(std::memory_order_relaxed)) {
+		return false;
+	}
+	Common::LockGuard lock(m_queue_mutex);
+	for (const auto& label: m_deferred_labels) {
+		if (label.address == address && label.tick == tick) {
+			return label.superseded;
+		}
+	}
+	return false;
+}
+
+void GuestGpu::DropCpVisibleLabels(uint64_t address, uint64_t size) {
+	if (!m_cp_visible_labels.load(std::memory_order_relaxed) || !HasDeferredLabels()) {
+		return;
+	}
+	Common::LockGuard lock(m_queue_mutex);
+	for (auto& label: m_deferred_labels) {
+		if (label.cp_visible && label.address < address + size &&
+		    address < label.address + label.size) {
+			label.cp_visible = false;
+			// Hardware wrote the label before the CP passed the wait that preceded this write.
+			label.superseded = label.cp_waited;
+			static std::atomic<uint64_t> dropped {0};
+			const auto count = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 16 || (count & 0xfffu) == 0) {
+				std::printf("Kyty end-of-pipe labels: %" PRIu64 " pending labels replaced by a later CP "
+				            "write (0x%" PRIx64 ", %s)\n",
+				            count, label.address, label.superseded ? "skipped" : "kept");
+			}
+		}
+	}
+}
+
+void GuestGpu::NoteCpVisibleLabelsWaited(uint64_t address, uint64_t size) {
+	Common::LockGuard lock(m_queue_mutex);
+	for (auto& label: m_deferred_labels) {
+		if (label.cp_visible && label.address < address + size &&
+		    address < label.address + label.size) {
+			label.cp_waited = true;
+		}
+	}
+}
+
+bool GuestGpu::CpVisibleLabelValue(uint64_t address, uint32_t size, void* value) {
+	if (!m_cp_visible_labels.load(std::memory_order_relaxed) || !HasDeferredLabels()) {
+		return false;
+	}
+	Common::LockGuard lock(m_queue_mutex);
+	bool              found = false;
+	// Oldest first: a newer label's bytes replace an older one's.
+	for (const auto& label: m_deferred_labels) {
+		if (!label.cp_visible || label.address >= address + size ||
+		    address >= label.address + label.size) {
+			continue;
+		}
+		const auto begin = std::max(address, label.address);
+		const auto end   = std::min(address + size, label.address + label.size);
+		std::memcpy(static_cast<uint8_t*>(value) + (begin - address),
+		            reinterpret_cast<const uint8_t*>(&label.value) + (begin - label.address),
+		            end - begin);
+		found = true;
+	}
+	return found;
 }
 
 void GuestGpu::Submit(std::span<const uint32_t> draw_commands,
@@ -968,6 +1040,29 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 }
 
+// Diagnostic (astrocrash): KYTY_CP_WRITE_LOG=1 prints each new (kind, address) once, at most 600:
+// command-processor writes to guest memory done by the CPU at record time (write-data, dma) and
+// WAIT_REG_MEM addresses (passed through a split-mode label, or suspended).
+static void LogCpAddress(const char* kind, uint64_t address, uint64_t value, uint64_t size,
+                         uint32_t queue) {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_CP_WRITE_LOG");
+		return v != nullptr && std::strcmp(v, "1") == 0;
+	}();
+	if (!enabled) {
+		return;
+	}
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> seen;
+	const uint64_t key = address ^ (static_cast<uint64_t>(kind[0]) << 56u) ^
+	                     (static_cast<uint64_t>(kind[1]) << 48u);
+	std::scoped_lock lock(mutex);
+	if (seen.size() < 600 && seen.insert(key).second) {
+		std::printf("Kyty cp %s 0x%" PRIx64 " value 0x%" PRIx64 " size %" PRIu64 " queue %u\n", kind,
+		            address, value, size, queue);
+	}
+}
+
 CpSeq::Result CommandProcessor::ExecWaitRegMem(const CpSeq::WaitRegMemOp& op) {
 	return op.size == sizeof(uint64_t) ? ExecWaitRegMemSized<uint64_t>(op)
 	                                   : ExecWaitRegMemSized<uint32_t>(op);
@@ -982,8 +1077,21 @@ CpSeq::Result CommandProcessor::ExecWaitRegMemSized(const CpSeq::WaitRegMemOp& o
 	const auto  ref   = static_cast<T>(op.ref);
 	const auto  mask  = static_cast<T>(op.mask);
 	const auto  func  = op.func;
-	const auto  value  = ReadGuestForCp<T>(reinterpret_cast<uint64_t>(addr));
-	const bool  passed = TestWaitRegMemValue(value, ref, mask, func);
+	auto        value  = ReadGuestForCp<T>(reinterpret_cast<uint64_t>(addr));
+	bool        passed = TestWaitRegMemValue(value, ref, mask, func);
+	// KYTY_LABEL_MODE=split: the guest sees end-of-pipe labels at completion, the command
+	// processor's own waits at record time, as in record mode (Kyty orders the GPU work itself).
+	if (!passed && g_gpu_state != nullptr &&
+	    g_gpu_state->CpVisibleLabelValue(reinterpret_cast<uint64_t>(addr), sizeof(T), &value)) {
+		passed = TestWaitRegMemValue(value, ref, mask, func);
+		if (passed) {
+			g_gpu_state->NoteCpVisibleLabelsWaited(reinterpret_cast<uint64_t>(addr), sizeof(T));
+		}
+		LogCpAddress(passed ? "wait-overlay" : "wait-overlay-fail", op.addr,
+		             static_cast<uint64_t>(value), sizeof(T), queue);
+	} else if (!passed) {
+		LogCpAddress("wait-suspend", op.addr, static_cast<uint64_t>(value), sizeof(T), queue);
+	}
 	blocked.Observed(static_cast<uint64_t>(value));
 	if (passed)
 		HangWatchdog::ClearQueueWait(queue);
@@ -1085,6 +1193,10 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 		        ? cache.TryWriteDataGpu(address, src + (dw_num - 1u), sizeof(uint32_t))
 		        : cache.TryWriteDataGpu(address, src, uint64_t {dw_num} * sizeof(uint32_t));
 		if (written) {
+			if (g_gpu_state != nullptr) {
+				g_gpu_state->DropCpVisibleLabels(
+				    address, write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * sizeof(uint32_t));
+			}
 			// KYTY_DRAW_RUN_QUIET_OPS: GPU-timeline writes still end a run (ExecuteOp).
 			if (DrawRun::Enabled() && DrawRun::QuietOpsEnabled()) {
 				DrawRun::NoteForeignActivity("WriteData gpu");
@@ -1097,6 +1209,9 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::WriteDataCpu);
 	TraceCpLabel("wd-cpu", dst, src[write_one_address ? dw_num - 1u : 0u], uint64_t {dw_num} * 4u);
+	LogCpAddress("write-data", op.dst, src[write_one_address ? dw_num - 1u : 0u],
+	             uint64_t {dw_num} * 4u,
+	             m_interrupt_event_id == 0 ? 0u : static_cast<uint32_t>(m_interrupt_event_id - 0x20 + 1));
 
 	if (write_one_address) {
 		for (uint32_t i = 0; i < dw_num; i++) {
@@ -2988,16 +3103,77 @@ CpSeq::Result CommandProcessor::ExecWaitFlipDone(const CpSeq::WaitFlipDoneOp& op
 
 // KYTY_LABEL_MODE=completion writes every end-of-pipe label (RELEASE_MEM / EVENT_WRITE_EOP data
 // writes) only after its tick has completed, in order, like hardware; the default ("record")
-// writes them when the packet is recorded and defers only visibility-proxy labels.
+// writes them when the packet is recorded and defers only visibility-proxy labels. "split" writes
+// them to guest memory at completion like "completion", but the command processor's own waits
+// (WAIT_REG_MEM) see each value at record time (GuestGpu::CpVisibleLabelValue), as in "record":
+// guest CPU threads cannot run ahead of the GPU, and the CP does not stall on GPU round trips.
+static bool LabelSplitMode() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_LABEL_MODE");
+		return value != nullptr && std::strcmp(value, "split") == 0;
+	}();
+	return enabled;
+}
+
 static bool LabelCompletionMode() {
 	static const bool enabled = [] {
 		const auto* value = std::getenv("KYTY_LABEL_MODE");
-		const bool  on    = value != nullptr && std::strcmp(value, "completion") == 0;
+		const bool  split = LabelSplitMode();
+		const bool  on    = split || (value != nullptr && std::strcmp(value, "completion") == 0);
 		std::printf("Kyty end-of-pipe labels: written at %s (KYTY_LABEL_MODE)\n",
-		            on ? "completion" : "record time");
+		            split ? "completion, CP waits see them at record time"
+		                  : (on ? "completion" : "record time"));
 		return on;
 	}();
 	return enabled;
+}
+
+// Diagnostic (astrocrash): KYTY_LABEL_COMPLETION_RANGES=<lo>-<hi>[,<lo>-<hi>...] (hex guest
+// addresses) defers only the end-of-pipe labels in those ranges to completion, like
+// KYTY_LABEL_MODE=completion does for all; KYTY_LABEL_ADDR_LOG=1 prints each new label address once
+// (at most 400) with its value and size.
+static bool LabelRangeSelected(uint64_t address, uint64_t value, uint32_t size) {
+	struct Range {
+		uint64_t lo;
+		uint64_t hi;
+	};
+	static const std::vector<Range> ranges = [] {
+		std::vector<Range> list;
+		const auto*        text = std::getenv("KYTY_LABEL_COMPLETION_RANGES");
+		for (const char* p = text; p != nullptr && *p != 0;) {
+			char*          end = nullptr;
+			const uint64_t lo  = std::strtoull(p, &end, 16);
+			uint64_t       hi  = lo;
+			if (end != nullptr && *end == '-') {
+				hi = std::strtoull(end + 1, &end, 16);
+			}
+			list.push_back({lo, hi});
+			std::printf("Kyty end-of-pipe labels: 0x%" PRIx64 "-0x%" PRIx64
+			            " written at completion (KYTY_LABEL_COMPLETION_RANGES)\n",
+			            lo, hi);
+			p = (end != nullptr && *end == ',') ? end + 1 : nullptr;
+		}
+		return list;
+	}();
+	static const bool log = [] {
+		const auto* value = std::getenv("KYTY_LABEL_ADDR_LOG");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (log) {
+		static std::mutex                   mutex;
+		static std::unordered_set<uint64_t> seen;
+		std::scoped_lock                    lock(mutex);
+		if (seen.size() < 400 && seen.insert(address).second) {
+			std::printf("Kyty label address 0x%" PRIx64 " value 0x%" PRIx64 " size %u\n", address,
+			            value, size);
+		}
+	}
+	for (const auto& r: ranges) {
+		if (address >= r.lo && address <= r.hi) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, bool interrupt,
@@ -3009,14 +3185,28 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 	// End-of-pipe writes become visible in order on hardware: while any older deferred write
 	// (label or GDS snapshot) is pending, a later label must not overtake it.
 	(void)address;
-	const bool ordered = !proxy && !all && gpu.HasDeferredLabels();
-	if (!proxy && !all && !ordered) {
+	// KYTY_LABEL_COMPLETION_INTERRUPTS=1 (diagnostic): labels that also raise an end-of-pipe
+	// interrupt are written at completion.
+	static const bool interrupts_at_completion = [] {
+		const auto* value = std::getenv("KYTY_LABEL_COMPLETION_INTERRUPTS");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	const bool selected =
+	    LabelRangeSelected(address, value, size) || (interrupts_at_completion && interrupt);
+	// KYTY_LABEL_COMPLETION_NOORDER=1 (diagnostic): labels outside the ranges stay at record time
+	// even while a selected one is pending, so a range bisect does not defer everything after it.
+	static const bool no_order = [] {
+		const auto* value = std::getenv("KYTY_LABEL_COMPLETION_NOORDER");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	const bool ordered = !proxy && !all && !selected && !no_order && gpu.HasDeferredLabels();
+	if (!proxy && !all && !selected && !ordered) {
 		return false;
 	}
 	m_defer_next_label = false;
 	auto&      scheduler = GetScheduler();
 	const auto tick      = scheduler.CurrentTick();
-	gpu.AddDeferredLabel(address, size, tick);
+	gpu.AddDeferredLabel(address, size, tick, value, LabelSplitMode());
 	HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, value, size);
 	TraceCpLabel(proxy ? "label-defer-proxy" : (ordered ? "label-defer-ordered" : "label-defer"),
 	             dst, value, size);
@@ -3050,7 +3240,11 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteDeferredLabel");
 				    HangWatchdog::Scope write("deferred-label-write", address, written, tick, size);
 				    HangWatchdog::DebugDelay("label", address);
-				    std::memcpy(reinterpret_cast<void*>(address), &written, size);
+				    // KYTY_LABEL_MODE=split: a later CP write to the label (the CP passed a wait
+				    // on it at record time) stays; hardware would have written the label first.
+				    if (!gpu.DeferredLabelSuperseded(address, tick)) {
+					    std::memcpy(reinterpret_cast<void*>(address), &written, size);
+				    }
 			    }
 			    ReadFaultDiag::NoteLabel("label-deferred-write", address, written);
 			    if (HangTrace::CpTraceEnabled()) {
@@ -4392,6 +4586,10 @@ void CommandProcessor::CopyFrontState(const CommandProcessor& from) {
 void NoteCpWrite(uint64_t address, uint64_t size) {
 	if (CpSeq::ConfiguredMode() == CpSeq::Mode::Thread && address != 0 && size != 0) {
 		Coherence::NoteContentWrite(address, size, Coherence::Source::CpWrite);
+	}
+	// KYTY_LABEL_MODE=split: a later CP write replaces a pending label's value in the CP's view.
+	if (g_gpu_state != nullptr && address != 0 && size != 0) {
+		g_gpu_state->DropCpVisibleLabels(address, size);
 	}
 }
 
