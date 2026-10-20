@@ -4405,6 +4405,9 @@ struct PipelineCache::PrefetchState {
 	struct Pending {
 		std::future<Result> future;
 		uint64_t ticket;
+		// Set by the worker before it runs the build: a build DropPending removed never started,
+		// and its future only holds a broken promise (no exceptions on Linux, so check first).
+		std::shared_ptr<std::atomic<bool>> started;
 	};
 	// keyed: builds describe their content and note it in the known-pipeline list (the skip
 	// builder, KYTY_PIPELINE_SKIP: its pipelines are published like the CP's own builds).
@@ -4417,12 +4420,8 @@ struct PipelineCache::PrefetchState {
 		for (auto& [key, job]: pending) {
 			(void)key;
 			if (!job.future.valid()) continue;
-			Result result;
-			try {
-				result = job.future.get();
-			} catch (const std::future_error&) {
-				continue; // dropped by Stop before it started
-			}
+			if (!job.started->load(std::memory_order_acquire)) continue; // dropped by Stop
+			Result result = job.future.get();
 			if (result.pipeline == nullptr) continue;
 			cache.m_graphics.device.destroyPipeline(result.pipeline->pipeline, nullptr);
 			ReleasePipelineLayout(cache.m_graphics, result.pipeline->pipeline_layout,
@@ -4484,8 +4483,12 @@ struct PipelineCache::PrefetchState {
 		    });
 		auto future = task->get_future();
 		const auto ticket = ++next_ticket;
-		if (queue.Submit([task] { (*task)(); }, ticket)) {
-			pending.emplace(key, Pending {std::move(future), ticket});
+		auto started = std::make_shared<std::atomic<bool>>(false);
+		if (queue.Submit([task, started] {
+			    started->store(true, std::memory_order_release);
+			    (*task)();
+		    }, ticket)) {
+			pending.emplace(key, Pending {std::move(future), ticket, std::move(started)});
 			pending_count.fetch_add(1, std::memory_order_relaxed);
 			submitted.fetch_add(1, std::memory_order_relaxed);
 			return true;
