@@ -732,6 +732,17 @@ if(LINUX)
 	target_link_libraries(live_switch_tests Threads::Threads)
 endif()
 
+# KYTY_GUEST_PROBE (common/guestProbe.h): probes retiring while other threads run through them, and a
+# deferred probe sharing a normal probe's address.
+add_executable(guest_probe_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GuestProbeTests.cpp"
+)
+target_link_libraries(guest_probe_tests common)
+target_include_directories(guest_probe_tests PRIVATE ${inc_headers})
+if(LINUX)
+	target_link_libraries(guest_probe_tests Threads::Threads)
+endif()
+
 add_executable(lod_stats_report_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LodStatsReportTests.cpp"
 )
@@ -1235,6 +1246,10 @@ if(BUILD_TESTING)
 	add_test(NAME cpu_placement_vcache_pending
 	         COMMAND $<TARGET_FILE:cpu_placement_tests> --vcache pending)
 	add_test(NAME live_switch COMMAND $<TARGET_FILE:live_switch_tests>)
+	add_test(NAME guest_probe_retire COMMAND $<TARGET_FILE:guest_probe_tests>)
+	add_test(NAME guest_probe_shared COMMAND $<TARGET_FILE:guest_probe_tests> --shared)
+	add_test(NAME guest_probe_equals COMMAND $<TARGET_FILE:guest_probe_tests> --equals)
+	set_tests_properties(guest_probe_retire guest_probe_shared guest_probe_equals PROPERTIES TIMEOUT 60)
 	add_test(NAME lod_stats_report COMMAND $<TARGET_FILE:lod_stats_report_tests>)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
 	add_test(NAME u59_preset COMMAND $<TARGET_FILE:u59_preset_tests>)

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <deque>
 #include <vector>
 
 #include <fmt/format.h>
@@ -30,11 +31,17 @@ struct MemSpec {
 	uint64_t off    = 0;
 	bool     deref  = false;
 	uint64_t off2   = 0;
+	std::vector<uint64_t> chain; // further '*<off>' levels after off2
 	uint64_t length = 0x40;
 	bool     condition = false; // '!' prefix: log only when these bytes are not all zero
 	bool     write     = false; // '=' prefix: store the 8-byte value <len> at the address (experiments)
 	bool     watch     = false; // '&' prefix: at the first matched hit, a hardware write watch (8 bytes)
+	bool     equals    = false; // '?' prefix: a condition; the 8 bytes there must equal `value`
+	uint64_t value     = 0;
 };
+
+// (*(u64*)at) + off2, then (*(u64*)that) + each chain offset; 0 when a level is unreadable.
+uint64_t Deref(const MemSpec& m, uint64_t at);
 
 struct Probe {
 	uint64_t             va       = 0;
@@ -45,6 +52,10 @@ struct Probe {
 	uint8_t              original = 0;
 	bool                 armed    = false;
 	bool                 deferred = false; // '^' prefix: armed by ArmDeferred()
+	// '~' prefix: never retires; keeps the last <hits> matched lines in a ring that ArmDeferred()
+	// prints once (the hits leading up to the event that armed the deferred probes).
+	bool                    ring = false;
+	std::deque<std::string> ring_lines;
 	std::vector<MemSpec> mem;
 };
 
@@ -95,6 +106,20 @@ bool Readable(uint64_t address, uint64_t size) {
 	return true;
 }
 
+uint64_t Deref(const MemSpec& m, uint64_t at) {
+	if (!Readable(at, 8)) {
+		return 0;
+	}
+	at = *reinterpret_cast<const uint64_t*>(at) + m.off2;
+	for (auto o: m.chain) {
+		if (!Readable(at, 8)) {
+			return 0;
+		}
+		at = *reinterpret_cast<const uint64_t*>(at) + o;
+	}
+	return at;
+}
+
 void WriteByte(uint64_t address, uint8_t value) {
 	DWORD old = 0;
 	VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old);
@@ -130,8 +155,15 @@ std::string Describe(const Probe& probe, const CONTEXT& c) {
 				line += fmt::format(" [{}]=unreadable", what);
 				continue;
 			}
-			address = *reinterpret_cast<const uint64_t*>(address) + m.off2;
+			address = Deref(m, address);
 			what += fmt::format("*{:x}", m.off2);
+			for (auto o: m.chain) {
+				what += fmt::format("*{:x}", o);
+			}
+			if (address == 0) {
+				line += fmt::format(" [{}]=unreadable", what);
+				continue;
+			}
 		}
 		line += fmt::format(" mem({}@{:x})=", what, address);
 		if (!Readable(address, m.length)) {
@@ -189,7 +221,7 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 		}
 		t_rearm = nullptr;
 		std::scoped_lock lock(g_mutex);
-		if (probe->hits < probe->max_hits) {
+		if (probe->ring || probe->hits < probe->max_hits) {
 			WriteByte(probe->address, 0xcc);
 		} else {
 			probe->armed = false;
@@ -211,17 +243,35 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 			}
 		}
 		if (probe == nullptr) {
+			// A thread that executed a probe's int3 just before another thread retired the probe
+			// (its last hit restored the original byte and cleared `armed`) arrives here late. The
+			// breakpoint is not this thread's to report: run the restored instruction.
+			for (const auto& p: g_probes) {
+				if (p.address == address && *reinterpret_cast<const volatile uint8_t*>(address) != 0xcc) {
+					c.Rip = address;
+					return EXCEPTION_CONTINUE_EXECUTION;
+				}
+			}
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 		probe->passes++;
 		bool matched = true;
 		for (const auto& m: probe->mem) {
+			if (m.equals) {
+				uint64_t at = RegValue(c, m.reg) + m.off;
+				if (m.deref) {
+					at = Deref(m, at);
+				}
+				matched = matched && at != 0 && Readable(at, 8) &&
+				          *reinterpret_cast<const uint64_t*>(at) == m.value;
+				continue;
+			}
 			if (!m.condition) {
 				continue;
 			}
 			uint64_t at = RegValue(c, m.reg) + m.off;
 			if (m.deref) {
-				at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+				at = Deref(m, at);
 			}
 			bool nonzero = false;
 			if (at != 0 && Readable(at, m.length)) {
@@ -233,14 +283,23 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 		}
 		if (matched) {
 			probe->hits++;
-			if (probe->hits <= probe->max_hits) {
+			if (probe->ring) {
+				auto entry = Describe(*probe, c);
+				if (entry.empty() || entry.back() != '\n') {
+					entry += '\n';
+				}
+				probe->ring_lines.push_back(std::move(entry));
+				if (probe->ring_lines.size() > probe->max_hits) {
+					probe->ring_lines.pop_front();
+				}
+			} else if (probe->hits <= probe->max_hits) {
 				line = Describe(*probe, c);
 			}
 			for (const auto& m: probe->mem) {
 				if (m.watch && g_watch_address.load() == 0 && new_watch == 0) {
 					uint64_t at = RegValue(c, m.reg) + m.off;
 					if (m.deref) {
-						at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+						at = Deref(m, at);
 					}
 					new_watch = at;
 				}
@@ -249,14 +308,14 @@ LONG WINAPI Handler(PEXCEPTION_POINTERS e) {
 				}
 				uint64_t at = RegValue(c, m.reg) + m.off;
 				if (m.deref) {
-					at = Readable(at, 8) ? *reinterpret_cast<const uint64_t*>(at) + m.off2 : 0;
+					at = Deref(m, at);
 				}
 				if (at != 0 && Readable(at, 8)) {
 					*reinterpret_cast<uint64_t*>(at) = m.length;
 				}
 			}
 		}
-		if ((probe->passes % 1000u) == 0u) {
+		if (!probe->ring && (probe->passes % 1000u) == 0u) {
 			line += fmt::format("GuestProbe: 0x{:x} passes {}, logged {}\n", probe->va,
 			                    probe->passes, probe->hits);
 		}
@@ -359,6 +418,10 @@ void Arm(uint64_t base, uint64_t size) {
 			probe.deferred = true;
 			head           = head.substr(1);
 		}
+		if (!head.empty() && head[0] == '~') {
+			probe.ring = true;
+			head       = head.substr(1);
+		}
 		if (const auto at = head.find('@'); at != head.npos) {
 			probe.max_hits = static_cast<uint32_t>(std::strtoul(std::string(head.substr(at + 1)).c_str(), nullptr, 10));
 			head           = head.substr(0, at);
@@ -379,13 +442,29 @@ void Arm(uint64_t base, uint64_t size) {
 				m.write = true;
 				f       = f.substr(1);
 			}
+			if (!f.empty() && f[0] == '?') {
+				m.equals = true;
+				m.length = 8;
+				f        = f.substr(1);
+				if (const auto eq = f.find('='); eq != f.npos) {
+					m.value = Hex(f.substr(eq + 1));
+					f       = f.substr(0, eq);
+				}
+			}
 			if (const auto colon = f.find(':'); colon != f.npos) {
 				m.length = Hex(f.substr(colon + 1));
 				f        = f.substr(0, colon);
 			}
 			if (const auto star = f.find('*'); star != f.npos) {
 				m.deref = true;
-				m.off2  = Hex(f.substr(star + 1));
+				auto rest = f.substr(star + 1);
+				auto next = rest.find('*');
+				m.off2    = Hex(rest.substr(0, next));
+				while (next != rest.npos) {
+					rest = rest.substr(next + 1);
+					next = rest.find('*');
+					m.chain.push_back(Hex(rest.substr(0, next)));
+				}
 				f       = f.substr(0, star);
 			}
 			const auto sign = f.find_first_of("+-");
@@ -411,8 +490,12 @@ void Arm(uint64_t base, uint64_t size) {
 		return;
 	}
 	AddVectoredExceptionHandler(1, Handler);
+	// Every probe's original byte first: a deferred probe at the address of an armed one would
+	// otherwise record the armed probe's int3 and restore it when it retires.
 	for (auto& p: g_probes) {
 		p.original = *reinterpret_cast<const uint8_t*>(p.address);
+	}
+	for (auto& p: g_probes) {
 		if (p.deferred) {
 			Log::WriteToConsoleAndLog(fmt::format(
 			    "GuestProbe: deferred 0x{:x} ({} hits, {} dumps; armed by ArmDeferred)\n", p.va,
@@ -429,6 +512,19 @@ void Arm(uint64_t base, uint64_t size) {
 
 void ArmDeferred(const char* reason) {
 	std::scoped_lock lock(g_mutex);
+	for (auto& p: g_probes) {
+		if (p.ring && p.armed) {
+			std::string text = fmt::format("GuestProbe: ring 0x{:x}, last {} of {} hits ({}):\n", p.va,
+			                               p.ring_lines.size(), p.hits, reason != nullptr ? reason : "");
+			for (const auto& l: p.ring_lines) {
+				text += l;
+			}
+			Log::WriteToConsoleAndLog(text);
+			p.ring_lines.clear();
+			p.max_hits = 0;
+			p.ring     = false;
+		}
+	}
 	for (auto& p: g_probes) {
 		if (!p.deferred || p.armed || p.hits != 0) {
 			continue;

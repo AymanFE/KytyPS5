@@ -332,6 +332,11 @@ static void EndFrame(State* s) {
 			std::fflush(stdout);
 		}
 	}
+	// Diagnostic (astrocrash): frames with more inline 24 KiB blocks than the usual 48.
+	if (s->frame_blocks > 48) {
+		std::printf("Agc cb watermark: buffer %p frame %" PRIu64 ": %" PRIu64 " game blocks of 24 KiB, %.2f MiB\n",
+		            s->bottom, s->frames, s->frame_blocks, Mib(s->frame_up + s->frame_down));
+	}
 	s->max_calls    = std::max(s->max_calls, s->frame_calls);
 	s->max_blocks   = std::max(s->max_blocks, s->frame_blocks);
 	s->prev_calls   = s->frame_calls;
@@ -397,7 +402,7 @@ static void Note(const void* bottom, const void* top, const void* cursor_up,
 	s->frame_up   = std::max(s->frame_up, up);
 	s->frame_down = std::max(s->frame_down, down);
 	// A frame that passes 75 % is reported while it runs: an overflowing frame never ends.
-	if (!s->alarmed && (up + down) * 4 > s->capacity * 3) {
+	if (!s->alarmed && ((up + down) * 4 > s->capacity * 3 || s->frame_blocks >= 64)) {
 		s->alarmed = true;
 		std::printf("Agc cb watermark: buffer %p (%.2f MiB) frame %" PRIu64 " passed 75%%: library "
 		            "%.2f MiB, game %.2f MiB, %" PRIu64 " library calls, %" PRIu64

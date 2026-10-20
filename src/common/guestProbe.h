@@ -16,6 +16,8 @@
 //     <mem>   <reg>[+-]<hexoff>[*<hexoff2>][:<hexlen>]: dump <len> bytes (default 0x40) at
 //             reg+off, or with *off2 at (*(u64*)(reg+off))+off2
 //             prefix '!': a condition; the hit counts and logs only if those bytes are not all 0
+//             prefix '?' with '=<hexvalue>' (e.g. ?rsi+0=908d31d40): a condition; the 8 bytes there
+//             must equal the value
 //             prefix '=': an experiment; stores the 8-byte value <hexlen> at the address
 //             prefix '&': at the first matched hit, a hardware write watch (ArmWriteWatch) on the
 //             8 bytes at that address, on every thread including this one

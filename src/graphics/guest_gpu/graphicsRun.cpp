@@ -63,6 +63,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <xxhash.h>
 
@@ -3000,6 +3001,54 @@ static bool LabelCompletionMode() {
 	return enabled;
 }
 
+// Diagnostic (astrocrash): KYTY_LABEL_COMPLETION_RANGES=<lo>-<hi>[,<lo>-<hi>...] (hex guest
+// addresses) defers only the end-of-pipe labels in those ranges to completion, like
+// KYTY_LABEL_MODE=completion does for all; KYTY_LABEL_ADDR_LOG=1 prints each new label address once
+// (at most 400) with its value and size.
+static bool LabelRangeSelected(uint64_t address, uint64_t value, uint32_t size) {
+	struct Range {
+		uint64_t lo;
+		uint64_t hi;
+	};
+	static const std::vector<Range> ranges = [] {
+		std::vector<Range> list;
+		const auto*        text = std::getenv("KYTY_LABEL_COMPLETION_RANGES");
+		for (const char* p = text; p != nullptr && *p != 0;) {
+			char*          end = nullptr;
+			const uint64_t lo  = std::strtoull(p, &end, 16);
+			uint64_t       hi  = lo;
+			if (end != nullptr && *end == '-') {
+				hi = std::strtoull(end + 1, &end, 16);
+			}
+			list.push_back({lo, hi});
+			std::printf("Kyty end-of-pipe labels: 0x%" PRIx64 "-0x%" PRIx64
+			            " written at completion (KYTY_LABEL_COMPLETION_RANGES)\n",
+			            lo, hi);
+			p = (end != nullptr && *end == ',') ? end + 1 : nullptr;
+		}
+		return list;
+	}();
+	static const bool log = [] {
+		const auto* value = std::getenv("KYTY_LABEL_ADDR_LOG");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (log) {
+		static std::mutex                   mutex;
+		static std::unordered_set<uint64_t> seen;
+		std::scoped_lock                    lock(mutex);
+		if (seen.size() < 400 && seen.insert(address).second) {
+			std::printf("Kyty label address 0x%" PRIx64 " value 0x%" PRIx64 " size %u\n", address,
+			            value, size);
+		}
+	}
+	for (const auto& r: ranges) {
+		if (address >= r.lo && address <= r.hi) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, bool interrupt,
                                      uint32_t interrupt_context_id, uint32_t timestamp_slot) {
 	const auto address = reinterpret_cast<uint64_t>(dst);
@@ -3009,8 +3058,22 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 	// End-of-pipe writes become visible in order on hardware: while any older deferred write
 	// (label or GDS snapshot) is pending, a later label must not overtake it.
 	(void)address;
-	const bool ordered = !proxy && !all && gpu.HasDeferredLabels();
-	if (!proxy && !all && !ordered) {
+	// KYTY_LABEL_COMPLETION_INTERRUPTS=1 (diagnostic): labels that also raise an end-of-pipe
+	// interrupt are written at completion.
+	static const bool interrupts_at_completion = [] {
+		const auto* value = std::getenv("KYTY_LABEL_COMPLETION_INTERRUPTS");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	const bool selected =
+	    LabelRangeSelected(address, value, size) || (interrupts_at_completion && interrupt);
+	// KYTY_LABEL_COMPLETION_NOORDER=1 (diagnostic): labels outside the ranges stay at record time
+	// even while a selected one is pending, so a range bisect does not defer everything after it.
+	static const bool no_order = [] {
+		const auto* value = std::getenv("KYTY_LABEL_COMPLETION_NOORDER");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	const bool ordered = !proxy && !all && !selected && !no_order && gpu.HasDeferredLabels();
+	if (!proxy && !all && !selected && !ordered) {
 		return false;
 	}
 	m_defer_next_label = false;
