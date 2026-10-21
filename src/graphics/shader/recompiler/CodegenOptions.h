@@ -106,9 +106,11 @@ struct CodegenOptions {
 	// zero min/max(-0, +0) returns unspecified and may treat denormals differently from the
 	// guest's compare (see EmitFastMinMaxF32), so this stays opt-in.
 	bool native_float_min_max = false;
-	// KYTY_UNIFORM_BUFFERS=0 (EmK530/KytyPS5 407de5105): keep constant-only buffers in the storage
-	// buffer array instead of binding them as uniform buffers (IR::UniformBufferResources).
-	bool uniform_buffers = true;
+	// KYTY_UNIFORM_BUFFERS=1 (EmK530/KytyPS5 407de5105): bind constant-only buffers as uniform
+	// buffers instead of storage buffers (IR::UniformBufferResources). Off by default: neutral in
+	// Miles Morales on an RTX 3090 (GPU busy within noise), and on NVIDIA's 16-byte uniform
+	// robustness granularity a read just past a V#'s end may return data instead of 0.
+	bool uniform_buffers = false;
 	// KYTY_WAVE64_WARPS=1 (EmK530/KytyPS5 420fc4ead): a wave64 compute program whose workgroup is
 	// the one wave runs on a 32-wide host as two host subgroups, one guest lane per invocation,
 	// instead of two lanes per invocation (Spirv::SplitWaveEligible). Cross-lane operations
