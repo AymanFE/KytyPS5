@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/aftermath.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -177,6 +178,9 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool que
 	            tick, DeviceFaultDiagnosticsEnabled());
 	LOGF("--- Device loss: submission/wait tick=%" PRIu64 " ---\n", tick);
 	DumpDeviceFault(graphics);
+	if (const auto violations = CommandRecorder::GuardViolations(); violations != 0) {
+		std::printf("  Kyty command guard (KYTY_CMD_GUARD): %" PRIu64 " violation(s) before the loss\n", violations);
+	}
 	GpuBreadcrumbs::Dump();
 	Aftermath::WaitForDump();
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {

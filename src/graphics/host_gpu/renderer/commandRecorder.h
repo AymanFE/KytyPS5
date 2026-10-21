@@ -83,6 +83,14 @@ public:
 	// hooks, which they wrap). No-op unless verify mode is on.
 	static void InstallVerifyHooks();
 
+	// KYTY_CMD_GUARD=1 (diagnostic, default off; "exit" stops at the first violation): a small
+	// command-buffer state machine on the dispatcher for every pool (guest, presenter, side,
+	// upload DMA, BDA table): recording outside Begin/End, two threads in one pool at once, a
+	// submit of a buffer that is not executable, and a reset/begin/free of a buffer whose
+	// timeline signal has not been reached. Installed after the verify hooks.
+	static void InstallGuardHooks(vk::Device device);
+	[[nodiscard]] static uint64_t GuardViolations() noexcept;
+
 	// Called by hooks and diagnostics: whether the calling thread may record into `command`.
 	[[nodiscard]] static bool MayRecord(VkCommandBuffer command) noexcept;
 

@@ -1996,6 +1996,12 @@ void WindowContext::CreateVulkan() {
 		if (HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
 		}
+		} else if (const auto* fault_only = std::getenv("KYTY_DEVICE_FAULT_EXT");
+		           fault_only != nullptr && std::strcmp(fault_only, "0") != 0 && fault_only[0] != '\0' &&
+		           HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+			// KYTY_DEVICE_FAULT_EXT=1 (diagnostic): only VK_EXT_device_fault, no checkpoints or NV
+			// diagnostics config, so the game runs at full speed; a loss prints the fault info.
+			device_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 		}
 		// KYTY_AFTERMATH=1: Nsight Aftermath crash dumps are enabled before the device is created and
 		// need VK_NV_device_diagnostics_config (its flags are set in VulkanCreateDevice).
@@ -2091,6 +2097,8 @@ void WindowContext::CreateVulkan() {
 	GpuOpProfiler::InstallHooks(graphic_ctx);
 	// KYTY_CP_RECORDER_VERIFY ownership hooks wrap the GpuOpProfiler's.
 	CommandRecorder::InstallVerifyHooks();
+	// KYTY_CMD_GUARD command-buffer state hooks wrap both.
+	CommandRecorder::InstallGuardHooks(graphic_ctx.device);
 	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 	EXIT_IF(graphic_ctx.queue == nullptr);
 	if (graphic_ctx.side_queue_index != 0) {
