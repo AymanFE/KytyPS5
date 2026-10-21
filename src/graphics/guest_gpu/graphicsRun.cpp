@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 #include "common/assert.h"
 #include "common/prepPhases.h"
@@ -1030,6 +1031,7 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 }
 
 void CommandProcessor::ExecDumpConstRam(const CpSeq::DumpConstRamOp& op, const uint32_t* src) {
+	StreamCopyDefer::NoteGuestWrite(op.dst, uint64_t {op.dw_num} * 4u);
 	memcpy(reinterpret_cast<uint32_t*>(op.dst), src, static_cast<size_t>(op.dw_num) * 4);
 	NoteCpWrite(op.dst, uint64_t {op.dw_num} * 4u);
 }
@@ -1300,6 +1302,7 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 	             uint64_t {dw_num} * 4u,
 	             m_interrupt_event_id == 0 ? 0u : static_cast<uint32_t>(m_interrupt_event_id - 0x20 + 1));
 
+	StreamCopyDefer::NoteGuestWrite(op.dst, write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u);
 	if (write_one_address) {
 		for (uint32_t i = 0; i < dw_num; i++) {
 			dst[0] = src[i];
@@ -1326,6 +1329,7 @@ void CommandProcessor::ExecReferenceClock(const CpSeq::ReferenceClockOp& op) {
 		     num_bytes);
 	}
 	const auto value = GuestGpuTimestamp();
+	StreamCopyDefer::NoteGuestWrite(dst_address, num_bytes);
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	NoteCpWrite(dst_address, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
@@ -3364,6 +3368,7 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    // KYTY_LABEL_MODE=split: a later CP write to the label (the CP passed a wait
 				    // on it at record time) stays; hardware would have written the label first.
 				    if (!gpu.DeferredLabelSuperseded(address, tick)) {
+					    StreamCopyDefer::NoteGuestWrite(address, size);
 					    std::memcpy(reinterpret_cast<void*>(address), &written, size);
 				    }
 			    }
@@ -3428,6 +3433,7 @@ bool CommandProcessor::WriteDroppedLabel(void* dst, uint64_t value, uint32_t siz
 		return interrupt;
 	}
 	KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel");
+	StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), size);
 	std::memcpy(dst, &value, size);
 	NoteCpWrite(reinterpret_cast<uint64_t>(dst), size);
 	QueueEopTimestamp(timestamp_slot, dst, value);
@@ -3549,6 +3555,7 @@ bool CommandProcessor::TryDeferGdsRead(uint32_t* dst, uint32_t dw_offset, uint32
 		    auto write = [renderer, &gpu, bytes = std::move(bytes), address, tick, interrupt,
 		                  event_id, interrupt_context_id](bool on_gpu_thread) {
 			    if (on_gpu_thread) {
+				    StreamCopyDefer::NoteGuestWrite(address, bytes.size());
 				    std::memcpy(reinterpret_cast<void*>(address), bytes.data(), bytes.size());
 			    } else {
 				    (void)LibKernel::Memory::TryWriteBacking(address, bytes.data(), bytes.size());
@@ -3683,6 +3690,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			// Guest label pages can be protected by resource tracking. Attribute any
 			// resulting fault separately from the end-of-pipe submission/interrupt work.
 			KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel32");
+			StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), sizeof(data));
 			std::memcpy(dst, &data, sizeof(data));
 		}
 		NoteCpWrite(reinterpret_cast<uint64_t>(dst), sizeof(data));
@@ -3718,6 +3726,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 					Profiler::ScopedGpuWaitReason wait_reason(Profiler::FrameWait::GpuWaitGds);
 					SynchronizeGpu();
+					StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), uint64_t {value >> 16u} * 4u);
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
 					NoteCpWrite(reinterpret_cast<uint64_t>(dst), uint64_t {value >> 16u} * 4u);
@@ -3768,6 +3777,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 					{
 						KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel64");
+						StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), sizeof(value));
 						std::memcpy(dst, &value, sizeof(value));
 					}
 					NoteCpWrite(reinterpret_cast<uint64_t>(dst), sizeof(value));
@@ -4074,6 +4084,7 @@ void CommandProcessor::ExecEventWrite(const CpSeq::EventWriteOp& op) {
 			constexpr uint64_t counter_mask = ready_bit - 1u;
 			auto*              results      = reinterpret_cast<volatile uint64_t*>(event_address);
 			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
+			StreamCopyDefer::NoteGuestWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}
@@ -4270,6 +4281,7 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 			}
 
 			if (!DeferFlipLabel(dst_gpu_addr, value, false)) {
+				StreamCopyDefer::NoteGuestWrite(op.dst, sizeof(value));
 				std::memcpy(dst_gpu_addr, &value, sizeof(value));
 				NoteCpWrite(op.dst, sizeof(value));
 			}
@@ -4315,6 +4327,7 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 				Live::OnCpFlip(); Libs::Graphics::PageManager::NoteCpFlip();
 				return;
 			}
+			StreamCopyDefer::NoteGuestWrite(op.dst, sizeof(value));
 			std::memcpy(dst_gpu_addr, &value, sizeof(value));
 			NoteCpWrite(op.dst, sizeof(value));
 			auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,

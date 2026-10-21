@@ -66,6 +66,10 @@
 #include <unistd.h>
 #endif
 
+namespace Libs::Graphics::StreamCopyDefer {
+void NoteGuestWrite(uint64_t address, uint64_t size); // bufferCache.h
+} // namespace Libs::Graphics::StreamCopyDefer
+
 namespace Libs::LibKernel::Memory {
 
 namespace VirtualMemory = Common::VirtualMemory;
@@ -1123,6 +1127,8 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
+	// KYTY_STREAM_COPY_DEFER: a pending recorder copy of these bytes runs first.
+	Graphics::StreamCopyDefer::NoteGuestWrite(vaddr, size);
 	return g_guest_address_space != nullptr &&
 	       g_guest_address_space->TryWriteBacking(vaddr, data, size);
 }

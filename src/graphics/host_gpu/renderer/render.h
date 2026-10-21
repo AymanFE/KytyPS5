@@ -975,6 +975,17 @@ public:
 			m_owner->m_buffer.writeBufferMarkerAMD(stage, buffer, offset, marker);
 		}
 	}
+	// KYTY_STREAM_COPY_DEFER: encodes a host copy of guest bytes for the recorder thread (in stream
+	// order, before the next Submit). False (nothing encoded) outside recorder encoding (recorder
+	// off or a direct window open): the caller then copies itself. Not a command: construct the
+	// sink directly (CommandSink(buffer)); Sink() would also flush the barrier batch.
+	[[nodiscard]] bool hostCopy(void* destination, uint64_t source, uint64_t size) const {
+		if (!m_owner->Encoding()) {
+			return false;
+		}
+		m_owner->m_encoder->hostCopy(destination, source, size);
+		return true;
+	}
 
 private:
 	const CommandBuffer* m_owner;

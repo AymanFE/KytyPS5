@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/cache/bufferLookupStats.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/cache/uploadDma.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
@@ -35,6 +36,8 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <bit>
+#include <intrin.h>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -609,6 +612,54 @@ bool DirtyQueryCombinedEnabled() {
 // KYTY_STREAM_DIRECT_READ=1 (default off; upstream 37501b5a7): a small read binding copied into
 // the stream buffer reads the guest bytes through the guest mapping instead of the backing store
 // (TryReadBacking). Its pages are CPU-dirty and not GPU-dirty, so no protection stops the read.
+BufferCache* g_defer_cache = nullptr; // the BufferCache whose stream copies are deferred
+
+bool StreamCopyProbe() {
+	static const bool enabled = ParseEnvU64("KYTY_STREAM_COPY_PROBE", 0) != 0;
+	return enabled;
+}
+
+void StreamCopyProbeAdd(uint64_t size, uint64_t cycles, uint64_t vaddr) {
+	static uint64_t count = 0, bytes = 0, total = 0, large = 0, start = 0, dup = 0, dup_bytes = 0;
+	static uint64_t hist[8] = {};
+	static std::unordered_map<uint64_t, uint64_t> last;
+	{
+		const auto key = vaddr ^ (size << 44u);
+		const auto t   = __rdtsc();
+		auto [it, inserted] = last.try_emplace(key, t);
+		if (!inserted) {
+			if (t - it->second < 33'600'000ull) { // 8 ms
+				dup++;
+				dup_bytes += size;
+			}
+			it->second = t;
+		}
+	}
+	count++;
+	bytes += size;
+	total += cycles;
+	hist[std::min<uint64_t>(std::bit_width(size) / 2u, 7u)]++;
+	large += size > 4096 ? 1u : 0u;
+	const auto now = __rdtsc();
+	if (start == 0) {
+		start = now;
+	}
+	if (now - start >= 42'000'000'000ull) {
+		std::printf("StreamCopy 10s: dup8ms %" PRIu64 " dupbytes %" PRIu64 " keys %zu ", dup, dup_bytes, last.size());
+		dup = dup_bytes = 0;
+		last.clear();
+		std::printf("copies %" PRIu64 " bytes %" PRIu64 " cycles %" PRIu64
+		            " large %" PRIu64 " sizes(log4) %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+		            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+		            count, bytes, total, large, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5],
+		            hist[6], hist[7]);
+		std::fflush(stdout);
+		count = bytes = total = large = 0;
+		std::fill(std::begin(hist), std::end(hist), 0u);
+		start = now;
+	}
+}
+
 bool StreamDirectReadEnabled() {
 	static const bool enabled = ParseEnvU64("KYTY_STREAM_DIRECT_READ", 0) != 0;
 	return enabled;
@@ -1517,6 +1568,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (g_defer_cache == this) {
+		g_defer_cache = nullptr;
+	}
 	if (m_upload_dma != nullptr) {
 		// The scheduler has drained by now; no later submission may wait on the upload DMA.
 		m_scheduler.SetSubmitDependency(nullptr, 1);
@@ -4032,6 +4086,90 @@ std::pair<Buffer*, uint64_t> BufferCache::VerifyBindingHit(const BindingMemo&   
 	return fresh;
 }
 
+bool StreamCopyDefer::Enabled() {
+	static const bool enabled = ParseEnvU64("KYTY_STREAM_COPY_DEFER", 0) != 0;
+	return enabled;
+}
+
+void BufferCache::PruneDeferredCopies(const CommandRecorder& recorder) {
+	const auto consumed = recorder.RingConsumed();
+	while (m_deferred_head < m_deferred.size() && m_deferred[m_deferred_head].position <= consumed) {
+		m_deferred_head++;
+	}
+	if (m_deferred_head == m_deferred.size()) {
+		m_deferred.clear();
+		m_deferred_head = 0;
+		m_deferred_lo   = UINT64_MAX;
+		m_deferred_hi   = 0;
+	}
+}
+
+bool BufferCache::TryDeferStreamCopy(uint8_t* mapped, uint64_t vaddr, uint64_t size) {
+	if (!StreamCopyDefer::Enabled() || m_range_memo_verify != 0 || m_binding_memo_verify != 0 ||
+	    !m_stream_buffer.IsCoherent() || !CpCommit::Enabled(CpCommit::Part::StreamRead) ||
+	    !GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	const auto& command  = m_scheduler.Current();
+	auto*       recorder = command.Recorder();
+	if (recorder == nullptr || recorder->GetMode() != CommandRecorder::Mode::Thread) {
+		return false;
+	}
+	if (m_deferred_recorder != recorder) {
+		// A different recorder (never in practice): the pending copies of the old one drain first.
+		if (m_deferred_recorder != nullptr && !m_deferred.empty()) {
+			m_deferred_recorder->Drain(nullptr, false);
+		}
+		m_deferred.clear();
+		m_deferred_head     = 0;
+		m_deferred_lo       = UINT64_MAX;
+		m_deferred_hi       = 0;
+		m_deferred_recorder = recorder;
+	}
+	if (!CommandSink(command).hostCopy(mapped, vaddr, size)) {
+		return false; // a direct window: the recorder is drained, copy now
+	}
+	g_defer_cache = this;
+	PruneDeferredCopies(*recorder);
+	m_deferred.push_back({vaddr, vaddr + size, recorder->RingWritePosition()});
+	m_deferred_lo = std::min(m_deferred_lo, vaddr);
+	m_deferred_hi = std::max(m_deferred_hi, vaddr + size);
+	return true;
+}
+
+void StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size) {
+	auto* cache = g_defer_cache;
+	if (cache == nullptr || cache->m_deferred.empty() || size == 0 || !GuestGpu::IsGpuThread()) {
+		return;
+	}
+	const auto end = address + size;
+	if (end <= cache->m_deferred_lo || address >= cache->m_deferred_hi) {
+		return;
+	}
+	auto* recorder = cache->m_deferred_recorder;
+	cache->PruneDeferredCopies(*recorder);
+	bool overlap = false;
+	for (size_t i = cache->m_deferred_head; i < cache->m_deferred.size() && !overlap; i++) {
+		const auto& copy = cache->m_deferred[i];
+		overlap          = address < copy.end && copy.begin < end;
+	}
+	if (!overlap) {
+		return;
+	}
+	static std::atomic<uint64_t> drains {0};
+	if (drains.fetch_add(1, std::memory_order_relaxed) < 8) {
+		std::printf("StreamCopyDefer: a CP write [0x%016" PRIx64 ", +0x%" PRIx64
+		            ") overlaps a pending stream copy: recorder drained\n",
+		            address, size);
+		std::fflush(stdout);
+	}
+	recorder->Drain(nullptr, false);
+	cache->m_deferred.clear();
+	cache->m_deferred_head = 0;
+	cache->m_deferred_lo   = UINT64_MAX;
+	cache->m_deferred_hi   = 0;
+}
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferNow(uint64_t vaddr, uint64_t size,
                                                           bool is_written, bool is_texel_buffer,
                                                           BufferId id, BufferId* obtained) {
@@ -4108,12 +4246,18 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferNow(uint64_t vaddr, uint64
 			if (mapped != nullptr && StreamDirectReadEnabled()) {
 				std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
 				read = true;
+			} else if (mapped != nullptr && TryDeferStreamCopy(mapped, vaddr, size)) {
+				read = true; // KYTY_STREAM_COPY_DEFER: the recorder copies the bytes
 			} else if (mapped != nullptr) {
 				// KYTY_CP_COMMIT=streamread: the reservation is committed only after a successful
 				// read, so the direct read may leave partial bytes in it when it fails.
+				const uint64_t probe_t0 = StreamCopyProbe() ? __rdtsc() : 0;
 				read = CpCommit::Enabled(CpCommit::Part::StreamRead)
 				           ? Libs::LibKernel::Memory::TryReadBackingDirect(vaddr, mapped, size)
 				           : Libs::LibKernel::Memory::TryReadBacking(vaddr, mapped, size);
+				if (probe_t0 != 0) {
+					StreamCopyProbeAdd(size, __rdtsc() - probe_t0, vaddr);
+				}
 			}
 			if (read) {
 				m_stream_buffer.Commit();

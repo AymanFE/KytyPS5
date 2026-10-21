@@ -233,6 +233,7 @@ const char* OpName(Op op) noexcept {
 	    "WriteBufferMarker",
 	    "ClearColorImage",
 	    "ClearDepthStencilImage",
+	    "HostCopy",
 	};
 	static_assert(std::size(names) == static_cast<size_t>(Op::Count));
 	const auto index = static_cast<size_t>(op);
@@ -1375,6 +1376,13 @@ void Encoder::writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool,
 	Close(w, m_options.verify
 	             ? VerifyHash::Value(Op::WriteTimestamp2, HandleBits(pool), query, stage_bits)
 	             : 0);
+}
+
+void Encoder::hostCopy(void* destination, uint64_t source, uint64_t size) {
+	const auto destination_bits = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(destination));
+	auto       w                = Open(Op::HostCopy, Sz<HostCopyPacket>(), false);
+	w.Put(HostCopyPacket {destination_bits, source, size});
+	Close(w, m_options.verify ? VerifyHash::Value(Op::HostCopy, destination_bits, source, size) : 0);
 }
 
 void Encoder::writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,

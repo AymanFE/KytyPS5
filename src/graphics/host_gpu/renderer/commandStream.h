@@ -98,6 +98,9 @@ enum class Op : uint16_t {
 	// Transfer clears (TextureCache::ClearImage).
 	ClearColorImage,
 	ClearDepthStencilImage,
+	// A host memcpy of guest bytes into mapped memory (KYTY_STREAM_COPY_DEFER, BufferCache): not a
+	// command; replayed in stream order, so before the Submit of the commands that read it.
+	HostCopy,
 	Count,
 };
 
@@ -355,6 +358,11 @@ struct WriteTimestampPacket {
 	vk::QueryPool pool  = nullptr;
 	uint64_t      stage = 0; // VkPipelineStageFlags2
 	uint32_t      query = 0;
+};
+struct HostCopyPacket {
+	uint64_t destination = 0; // host pointer (mapped stream ring)
+	uint64_t source      = 0; // guest virtual address
+	uint64_t size        = 0;
 };
 struct WriteBufferMarkerPacket {
 	vk::Buffer buffer = nullptr;
@@ -727,6 +735,7 @@ public:
 	                          vk::Buffer destination, vk::DeviceSize offset, vk::DeviceSize stride,
 	                          vk::QueryResultFlags flags);
 	void writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool, uint32_t query);
+	void hostCopy(void* destination, uint64_t source, uint64_t size);
 	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
 	                          uint32_t marker);
 	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color,

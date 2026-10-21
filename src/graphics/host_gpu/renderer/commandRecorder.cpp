@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/watchdogSubmit.h"
+#include "kernel/memory.h"
 
 #include <algorithm>
 #include <array>
@@ -582,6 +583,12 @@ struct CommandRecorder::NativeExecutor {
 	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
 	                          uint32_t marker) {
 		command.writeBufferMarkerAMD(stage, buffer, offset, marker);
+	}
+	// KYTY_STREAM_COPY_DEFER (BufferCache::ObtainBufferNow): the stream copy the CP reserved.
+	void hostCopy(void* destination, uint64_t source, uint64_t size) {
+		if (!Libs::LibKernel::Memory::TryReadBackingDirect(source, destination, size)) {
+			std::memset(destination, 0, static_cast<size_t>(size));
+		}
 	}
 };
 

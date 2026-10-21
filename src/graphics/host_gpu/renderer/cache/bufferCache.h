@@ -32,9 +32,26 @@ class CommandScheduler;
 class TextureCache;
 class UploadDma;
 struct UploadHostCopy;
+class CommandRecorder;
 
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
+
+// KYTY_STREAM_COPY_DEFER=1 (default off): the stream copy of a small CPU-dirty read binding
+// (ObtainBufferNow) is reserved in the stream ring on the command processor, but the bytes are
+// copied by the recorder thread (KYTY_CP_RECORDER, CommandStream::Op::HostCopy) in stream order,
+// so before the Submit of the commands that read them: about 2,300 copies, 7.5 MB and 0.45 ms of
+// the command processor per Sky Garden frame. The guest bytes are then read later than the
+// command processor's draw, but still before the GPU work runs, as the PS5's GPU reads them.
+// Every command-processor write of guest memory between the two (NoteCpWrite, backing writes on
+// the GPU thread) that overlaps a pending copy drains the recorder first, so such a write is
+// never seen by an earlier draw. Off with the recorder off, in a direct window, with the memo
+// verify modes, or a non-coherent stream ring.
+namespace StreamCopyDefer {
+[[nodiscard]] bool Enabled();
+// GPU thread: a command-processor write of guest memory [address, address + size).
+void NoteGuestWrite(uint64_t address, uint64_t size);
+} // namespace StreamCopyDefer
 
 // KYTY_BDA_WRITES=1 (or =verify): shaders store and do atomics through V#s they compute, through
 // BDA, and the renderer settles each such dispatch synchronously (BufferCache::SettleBdaWrites).
@@ -876,6 +893,21 @@ private:
 	// After the staging ring: destroyed first, waiting for its copies that read the ring.
 	std::unique_ptr<UploadDma>                        m_upload_dma;
 	StreamBuffer                                      m_stream_buffer;
+	// KYTY_STREAM_COPY_DEFER: copies encoded for the recorder that it may not have executed yet
+	// (ring position after each), in encoding order from m_deferred_head; [lo, hi) bounds them.
+	struct DeferredCopy {
+		uint64_t begin    = 0;
+		uint64_t end      = 0;
+		uint64_t position = 0;
+	};
+	[[nodiscard]] bool TryDeferStreamCopy(uint8_t* mapped, uint64_t vaddr, uint64_t size);
+	void               PruneDeferredCopies(const CommandRecorder& recorder);
+	friend void        StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size);
+	std::vector<DeferredCopy> m_deferred;
+	size_t                    m_deferred_head = 0;
+	uint64_t                  m_deferred_lo   = UINT64_MAX;
+	uint64_t                  m_deferred_hi   = 0;
+	CommandRecorder*          m_deferred_recorder = nullptr;
 	StreamBuffer                                      m_download_buffer;
 	StreamBuffer                                      m_device_buffer;
 	TextureCache&                                     m_texture_cache;

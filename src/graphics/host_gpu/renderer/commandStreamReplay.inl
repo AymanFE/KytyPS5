@@ -517,6 +517,13 @@ void Replay(const Header& header, Exec& exec, ReplayState& state, MismatchHandle
 			exec.writeTimestamp2(stage, p.pool, p.query);
 			break;
 		}
+		case Op::HostCopy: {
+			const auto& p = reader.Get<HostCopyPacket>();
+			check(VerifyHash::Value(op, p.destination, p.source, p.size));
+			exec.hostCopy(reinterpret_cast<void*>(static_cast<uintptr_t>(p.destination)), p.source,
+			              p.size);
+			break;
+		}
 		case Op::WriteBufferMarker: {
 			const auto& p           = reader.Get<WriteBufferMarkerPacket>();
 			uint64_t    buffer_bits = 0;

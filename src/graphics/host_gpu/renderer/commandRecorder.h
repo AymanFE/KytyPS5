@@ -72,6 +72,10 @@ public:
 	// Waits until the Submit packet of `tick` has been executed (handed to the broker or the
 	// queue). From the producer it first wakes the recorder; any thread may call it.
 	void WaitRecorded(uint64_t tick, bool from_producer);
+	// Ring positions (CP thread): bytes encoded so far, and executed by the recorder. A packet
+	// encoded before WritePosition() returned P has executed once Consumed() >= P.
+	[[nodiscard]] uint64_t RingWritePosition() const noexcept { return m_ring.WritePosition(); }
+	[[nodiscard]] uint64_t RingConsumed() const noexcept { return m_ring.Consumed(); }
 	// The tick of the last Submit packet executed.
 	[[nodiscard]] uint64_t RecordedTick() const noexcept {
 		return m_recorded_tick.load(std::memory_order_acquire);

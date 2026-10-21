@@ -278,6 +278,9 @@ struct LogExecutor {
 		     VerifyHash::Value(Op::WriteTimestamp2, Bits(p), q,
 		                       static_cast<uint64_t>(static_cast<VkPipelineStageFlags2>(st))));
 	}
+	void hostCopy(void* d, uint64_t src, uint64_t n) {
+		Push(Op::HostCopy, VerifyHash::Value(Op::HostCopy, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(d)), src, n));
+	}
 	void writeBufferMarkerAMD(vk::PipelineStageFlagBits st, vk::Buffer b, vk::DeviceSize o, uint32_t m) {
 		Push(Op::WriteBufferMarker,
 		     VerifyHash::Value(Op::WriteBufferMarker, Bits(b), o,
@@ -817,6 +820,15 @@ public:
 				expected.push_back({op, VerifyHash::Value(op, LogExecutor::Bits(b), o,
 				                                          static_cast<uint32_t>(static_cast<VkPipelineStageFlagBits>(stage)),
 				                                          m)});
+				break;
+			}
+			case Op::HostCopy: {
+				// Encoded only: the log executor checks the stream order and fields.
+				auto*          d   = reinterpret_cast<void*>(static_cast<uintptr_t>(U64() & ~uint64_t {7}));
+				const uint64_t src = U64();
+				const uint64_t sz  = 1 + Below(4096);
+				e.hostCopy(d, src, sz);
+				expected.push_back({op, VerifyHash::Value(op, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(d)), src, sz)});
 				break;
 			}
 			case Op::ClearColorImage:
