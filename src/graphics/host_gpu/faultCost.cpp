@@ -256,6 +256,9 @@ struct MapWindow {
 	uint64_t split_concurrent_any[ThreadClasses] {};
 	// Fault handler time by thread name (guest threads by their names).
 	std::unordered_map<std::string, std::array<uint64_t, 2>> by_thread; // faults, ns
+	// Read faults by guest rip: faults, ns, last address.
+	std::unordered_map<uint64_t, std::array<uint64_t, 3>> read_rips;
+	std::unordered_map<uint64_t, std::string>             read_rip_thread;
 	// Host-call lock waits outside faults (NoteHostLockWait), by thread class.
 	uint64_t lock_waits[ThreadClasses] {};
 	uint64_t lock_wait_ns[ThreadClasses] {};
@@ -396,6 +399,31 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 		            "%d pages, in %u of %u frames, %.1f us/fault, last rip %s0x%" PRIx64 " thread '%s'\n",
 		            key << 16u, per(sum), per(s->faults[0]), per(s->faults[1]), per(s->faults[2]),
 		            __builtin_popcountll(s->page_mask), s->frames, frames,
+		            static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) / 1e3,
+		            emulator ? "kyty+" : "", emulator ? s->rip - g_exe_begin : s->rip, s->thread);
+	}
+	{
+		std::vector<std::pair<uint64_t, std::array<uint64_t, 3>>> rr(window.read_rips.begin(), window.read_rips.end());
+		std::sort(rr.begin(), rr.end(), [](const auto& a, const auto& b) { return a.second[0] > b.second[0]; });
+		for (size_t i = 0; i < std::min<size_t>(rr.size(), 12); i++) {
+			const auto& [rip, r] = rr[i];
+			const bool emulator  = rip >= g_exe_begin && rip < g_exe_end;
+			std::printf("FaultMap   read rip %s0x%" PRIx64 ": %.2f faults/frame, %.1f us/fault, last address 0x%" PRIx64
+			            " thread '%s'\n",
+			            emulator ? "kyty+" : "", emulator ? rip - g_exe_begin : rip, per(r[0]),
+			            static_cast<double>(r[1]) / std::max<double>(static_cast<double>(r[0]), 1.0) / 1e3, r[2],
+			            window.read_rip_thread.at(rip).c_str());
+		}
+	}
+	// The blocks whose faults cost most time in the handler.
+	std::sort(blocks.begin(), blocks.end(), [](const auto& a, const auto& b) { return a.second->ns > b.second->ns; });
+	for (size_t i = 0; i < std::min<size_t>(blocks.size(), 10); i++) {
+		const auto& [key, s] = blocks[i];
+		const auto sum       = s->faults[0] + s->faults[1] + s->faults[2];
+		const bool emulator  = s->rip >= g_exe_begin && s->rip < g_exe_end;
+		std::printf("FaultMap   slow block 0x%010" PRIx64 ": %.2f faults/frame (guest %.2f), %.3f ms/frame, %.1f us/fault, "
+		            "last rip %s0x%" PRIx64 " thread '%s'\n",
+		            key << 16u, per(sum), per(s->faults[1]), per(s->ns) / 1e6,
 		            static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) / 1e3,
 		            emulator ? "kyty+" : "", emulator ? s->rip - g_exe_begin : s->rip, s->thread);
 	}
@@ -1276,6 +1304,11 @@ void MapFault(const FaultRecord& record) noexcept {
 	}
 	if (!record.write) {
 		window.read_faults++;
+		auto& r = window.read_rips[t_fault_rip];
+		r[0]++;
+		r[1] += record.handler_ns;
+		r[2] = record.address;
+		window.read_rip_thread[t_fault_rip] = std::string(name, strnlen(name, sizeof(name)));
 	} else {
 		// MapInFault(false) ran just before: the thread-local split describes this fault.
 		window.split_faults[thread]++;
