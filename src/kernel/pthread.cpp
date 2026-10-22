@@ -1202,6 +1202,7 @@ void PthreadInitSelfForMainThread() {
 #endif
 	g_pthread_self->host_thread_id = os_thread_id;
 	g_pthread_main                 = g_pthread_self;
+	Common::PlaceCurrentThreadGuest();
 
 	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
 	     ", stack_size = %" PRIu64 "\n",
@@ -3468,6 +3469,7 @@ static void* RunThread(void* arg) {
 	SetThreadPriority(GetCurrentThread(),
 	                  GuestThreadHostPriority(thread->attr->guest_priority, thread->core_bound));
 #endif
+	Common::PlaceCurrentThreadGuest();
 	LOGF("\tPthread run begin: %s, id = %d, os_thread_id = %" PRIu64 ", entry = 0x%016" PRIx64
 	     ", arg = 0x%016" PRIx64 ", stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64 "\n",
 	     thread->name.c_str(), thread->unique_id, os_thread_id,

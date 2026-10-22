@@ -67,6 +67,10 @@
 //   inside the V-cache CCD. Cold threads (PlaceCurrentThreadCold: shader and pipeline compile
 //   workers, pipeline journal/cache savers, file I/O, audio3d playback, diagnostics and monitors)
 //   get the other CCD through their thread-selected CPU sets.
+// - KYTY_VCACHE_GUEST=all (default): guest threads (PlaceCurrentThreadGuest) run on every allowed
+//   processor outside the reserved cores, both CCDs, through their thread-selected CPU sets.
+//   hot: only the hot processors (int19.3-int20); cold: only the other CCD. With hot, Astro Bot's
+//   threads got 14 logical processors and its Draw Geometry thread fell behind (Bug C).
 // - One "Kyty V-cache placement" line logs the decision at startup and whenever it changes.
 //
 // Placement samples, with the profiler's aggregates, the hang trace or
@@ -193,6 +197,10 @@ void PlaceCurrentThread(ThreadRole role);
 // after the first call; the thread is forgotten when it exits. Never call it from a thread that
 // may run hot work (the CP, guest threads, draw-prep workers).
 void PlaceCurrentThreadCold();
+// A guest thread (guest pthreads, the guest main thread): with the V-cache placement and
+// KYTY_VCACHE_GUEST=all (default) it runs on every allowed processor outside the reserved cores,
+// otherwise on the process default. Idempotent per thread; forgotten when the thread exits.
+void PlaceCurrentThreadGuest();
 // The current layout (a copy; tests and logs).
 [[nodiscard]] CpuLayout CurrentCpuLayout();
 

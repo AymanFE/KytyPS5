@@ -625,6 +625,8 @@ struct State {
 		HANDLE handle = nullptr;
 	};
 	std::vector<ColdThread> cold;
+	// PlaceCurrentThreadGuest threads (guest pthreads and the guest main thread).
+	std::vector<ColdThread> guest;
 #endif
 	// KYTY_VCACHE_PLACEMENT.
 	VCacheTopology                        topology;
@@ -757,6 +759,48 @@ void LogVCacheLocked(State& state, const char* why, const std::string& text) {
 	std::fflush(stdout);
 }
 
+// KYTY_VCACHE_GUEST=all|hot|cold (default all): with the V-cache placement, guest threads run on
+// every allowed processor outside the reserved cores (all), only on the hot processors of the
+// V-cache CCD (hot, the int19.3-int20 behaviour) or only on the other CCD (cold). With hot, Astro
+// Bot's game threads shared 14 logical processors with the emulator's hot threads; in
+// speedrun_inflator its Draw Geometry thread then fell a frame behind and overflowed its command
+// buffer (Bug C, every boot). all: Sky Garden +3 %, sponge_dirty_bath +2 %, pirate island equal
+// (7950X3D + RTX 3090, 3 boots each, non-PGO).
+enum class GuestPlacement : uint8_t { All, Hot, Cold };
+
+GuestPlacement GetGuestPlacement() {
+	static const GuestPlacement mode = [] {
+		const auto* value = EnvValue("KYTY_VCACHE_GUEST");
+		if (value != nullptr && std::strcmp(value, "hot") == 0) {
+			return GuestPlacement::Hot;
+		}
+		if (value != nullptr && std::strcmp(value, "cold") == 0) {
+			return GuestPlacement::Cold;
+		}
+		return GuestPlacement::All;
+	}();
+	return mode;
+}
+
+bool GuestWide() {
+	return GetGuestPlacement() != GuestPlacement::Hot;
+}
+
+#if defined(_WIN32)
+// State mutex held: the CPU sets of guest threads, empty for the process default.
+std::vector<uint32_t> GuestIdsLocked(const State& state) {
+	if (!state.layout.vcache || !GuestWide()) {
+		return {};
+	}
+	if (GetGuestPlacement() == GuestPlacement::Cold) {
+		return state.layout.cold_ids;
+	}
+	std::vector<uint32_t> ids = state.layout.general_ids;
+	ids.insert(ids.end(), state.layout.cold_ids.begin(), state.layout.cold_ids.end());
+	return ids;
+}
+#endif
+
 // State mutex held: computes the layout for the current process mask and constraint and applies
 // it: the process default CPU sets (the general processors of a reservation, the hot processors
 // of the V-cache placement, or every allowed processor with only KYTY_CPU_SETS), the reserved
@@ -777,6 +821,12 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true, bool keep
 	const auto vcache_text = VCacheDecisionLocked(state, &vcache_layout);
 	if (vcache_layout.vcache) {
 		state.layout = std::move(vcache_layout);
+		if (GetGuestPlacement() == GuestPlacement::All) {
+			state.layout.description += "; guest threads on every processor outside the reserved "
+			                            "cores (KYTY_VCACHE_GUEST=all)";
+		} else if (GetGuestPlacement() == GuestPlacement::Cold) {
+			state.layout.description += "; guest threads on the cold processors (KYTY_VCACHE_GUEST=cold)";
+		}
 	} else {
 		// Ties between caches go to the V-cache CCD (measured, not by index).
 		state.layout = ComputeCpuLayout(state.sets, mode, ForcedCpLogical(), kMinGeneralProcessors,
@@ -846,6 +896,10 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true, bool keep
 	for (const auto& thread: state.cold) {
 		ApplyThreadSets(thread.handle,
 		                state.layout.vcache ? state.layout.cold_ids : std::vector<uint32_t> {});
+	}
+	const auto guest_ids = GuestIdsLocked(state);
+	for (const auto& thread: state.guest) {
+		ApplyThreadSets(thread.handle, guest_ids);
 	}
 	state.vcache_applied = state.layout.vcache;
 #else
@@ -1036,28 +1090,33 @@ void PlaceCurrentThread(ThreadRole role) {
 #if defined(_WIN32)
 namespace {
 
-// The calling thread as a cold thread while it lives.
+// The calling thread as a cold (or guest) thread while it lives.
 struct ColdRegistration {
-	ColdRegistration() {
+	explicit ColdRegistration(bool guest_thread = false): guest(guest_thread) {
 		InitCpuPlacement();
 		auto&           state = GetState();
 		std::lock_guard lock(state.mutex);
 		HANDLE          handle = nullptr;
 		if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, 0,
 		                    FALSE, DUPLICATE_SAME_ACCESS) != 0) {
-			state.cold.push_back({tid, handle});
+			(guest ? state.guest : state.cold).push_back({tid, handle});
 		}
-		if (state.layout.vcache) {
+		if (guest) {
+			if (const auto ids = GuestIdsLocked(state); !ids.empty()) {
+				ApplyThreadSets(GetCurrentThread(), ids);
+			}
+		} else if (state.layout.vcache) {
 			ApplyThreadSets(GetCurrentThread(), state.layout.cold_ids);
 		}
 	}
 	~ColdRegistration() {
 		auto&           state = GetState();
 		std::lock_guard lock(state.mutex);
-		for (auto it = state.cold.begin(); it != state.cold.end(); ++it) {
+		auto&           list = guest ? state.guest : state.cold;
+		for (auto it = list.begin(); it != list.end(); ++it) {
 			if (it->tid == tid) {
 				CloseHandle(it->handle);
-				state.cold.erase(it);
+				list.erase(it);
 				break;
 			}
 		}
@@ -1065,7 +1124,8 @@ struct ColdRegistration {
 	ColdRegistration(const ColdRegistration&)            = delete;
 	ColdRegistration& operator=(const ColdRegistration&) = delete;
 
-	DWORD tid = GetCurrentThreadId();
+	bool  guest = false;
+	DWORD tid   = GetCurrentThreadId();
 };
 
 } // namespace
@@ -1074,6 +1134,13 @@ struct ColdRegistration {
 void PlaceCurrentThreadCold() {
 #if defined(_WIN32)
 	thread_local ColdRegistration registration;
+	(void)registration;
+#endif
+}
+
+void PlaceCurrentThreadGuest() {
+#if defined(_WIN32)
+	thread_local ColdRegistration registration(true);
 	(void)registration;
 #endif
 }
