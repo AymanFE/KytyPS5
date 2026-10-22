@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 
 namespace PaceLog {
 
@@ -23,6 +24,7 @@ struct Entry {
 };
 
 FILE*                  g_file = nullptr;
+FILE*                  g_waits = nullptr;
 std::mutex             g_mutex;
 std::array<Entry, 64>  g_entries {};
 uint64_t               g_origin_ns = 0;
@@ -53,6 +55,10 @@ bool Enabled() {
 		std::fprintf(g_file, "present_us,vblank,reserve_us,ready_us,flipsub_us,framesub_us,cpstart_us,"
 		                     "done_us,donewait_us,present_cost_us,gpu_busy_us,gpu_idle_us,"
 		                     "gpu_starved_us,gpu_cmdbufs,gpu_last_end_us\n");
+		g_waits = std::fopen((std::string(path) + ".waits.csv").c_str(), "w");
+		if (g_waits != nullptr) {
+			std::fprintf(g_waits, "begin_us,end_us,tid,filter,ident,events,name\n");
+		}
 		g_origin_ns = NowNs();
 		return true;
 	}();
@@ -125,6 +131,20 @@ void NoteGpuFrame(uint64_t busy_ns, uint64_t idle_ns, uint64_t starved_ns, uint6
 	g_gpu_starved  = starved_ns;
 	g_gpu_cmdbufs  = cmdbufs;
 	g_gpu_last_end = last_end_ns;
+}
+
+void NoteWait(uint64_t begin_ns, uint64_t end_ns, int tid, int filter, uint64_t ident, int events,
+              const char* name) {
+	if (!Enabled() || g_waits == nullptr || end_ns < begin_ns + 100'000u) {
+		return;
+	}
+	std::lock_guard lock(g_mutex);
+	std::fprintf(g_waits, "%" PRIu64 ",%" PRIu64 ",%d,%d,0x%" PRIx64 ",%d,%s\n", Rel(begin_ns),
+	             Rel(end_ns), tid, filter, ident, events, name != nullptr ? name : "");
+	static uint32_t lines = 0;
+	if ((++lines & 255u) == 0) {
+		std::fflush(g_waits);
+	}
 }
 
 void NotePresent(uint64_t request_id, uint64_t vblank, uint64_t tick_ns, uint64_t present_ns) {

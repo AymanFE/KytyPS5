@@ -34,6 +34,10 @@ void NoteReady(uint64_t request_id);
 // GPU timing fold (GpuTiming::OnGuestFlip).
 void NoteGpuFrame(uint64_t busy_ns, uint64_t idle_ns, uint64_t starved_ns, uint64_t cmdbufs,
                   uint64_t last_end_ns);
+// A guest blocking wait (equeue) that took >= 100 us: one line in <KYTY_PACE_LOG>.waits.csv
+// (begin_us,end_us,tid,filter,ident,events,name).
+void NoteWait(uint64_t begin_ns, uint64_t end_ns, int tid, int filter, uint64_t ident, int events,
+              const char* name);
 // Presented flip: writes the line.
 void NotePresent(uint64_t request_id, uint64_t vblank, uint64_t tick_ns, uint64_t present_ns);
 
