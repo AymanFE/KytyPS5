@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/hangTrace.h"
 #include "common/liveSwitch.h"
+#include "common/paceLog.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/eopTimestamps.h"
@@ -303,6 +304,8 @@ void OnGuestFlip() {
 	frame.dispatch_latency_ns  = ToUnsignedNs(dispatch_latency_ns);
 	frame.dropped              = dropped + unavailable + rejected;
 	HangTrace::RecordGpuFrame(frame);
+	PaceLog::NoteGpuFrame(frame.busy_ns, frame.idle_ns, frame.starved_ns, frame.command_buffers,
+	                      calibration.valid && have_cursor ? ToUnsignedNs(to_steady(cursor)) : 0);
 	g_total_busy_ns.fetch_add(frame.busy_ns, std::memory_order_relaxed);
 	g_total_idle_ns.fetch_add(frame.idle_ns, std::memory_order_relaxed);
 	g_total_starved_ns.fetch_add(frame.starved_ns, std::memory_order_relaxed);

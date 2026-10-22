@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/prepPhases.h"
+#include "common/paceLog.h"
 #include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
@@ -635,6 +636,7 @@ void GuestGpu::Done() {
 	}
 	HangWatchdog::Scope blocked("agc-done-prefix", reinterpret_cast<uint64_t>(this), target);
 	const auto wait_start = HangTrace::Enabled() ? HangTrace::NowNs() : 0;
+	const auto pace_start = PaceLog::Enabled() ? PaceLog::NowNs() : 0;
 	{
 		Profiler::ScopedFrameWait frame_wait(Profiler::FrameWait::AgcDoneWait);
 		Common::LockGuard         lock(m_queue_mutex);
@@ -653,6 +655,9 @@ void GuestGpu::Done() {
 	}
 	if (HangTrace::Enabled()) {
 		HangTrace::RecordDoneWait(HangTrace::NowNs() - wait_start);
+	}
+	if (pace_start != 0) {
+		PaceLog::NoteDone(pace_start, PaceLog::NowNs() - pace_start);
 	}
 }
 
@@ -1449,6 +1454,9 @@ void GuestGpu::Enqueue(Submission submission) {
 	if (HangTrace::Enabled()) {
 		submission.enqueue_ns = HangTrace::NowNs();
 	}
+	if (PaceLog::Enabled()) {
+		submission.pace_enqueue_ns = PaceLog::NowNs();
+	}
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	submission.sequence    = m_next_submission_sequence++;
@@ -1754,6 +1762,9 @@ bool GuestGpu::Process(Submission& submission) {
 
 	if (first_slice) {
 		submission.started = true;
+		if (submission.type == SubmissionType::Graphics) {
+			PaceLog::NoteCpSubmission(submission.pace_enqueue_ns, submission.reset_processor);
+		}
 		cp.SetSubmitId(++m_submit_id);
 		cp.ResetDeCe();
 		cp.SetFlip({});
@@ -1857,6 +1868,7 @@ bool GuestGpu::ProcessSequenced(Submission& submission) {
 	if (first_slice) {
 		SyncEpoch::AdvanceSubmission();
 		submission.started = true;
+		PaceLog::NoteCpSubmission(submission.pace_enqueue_ns, submission.reset_processor);
 		cp.SetSubmitId(++m_submit_id);
 		// The frame fence's ordering point: the sequencer reads a fenced submission's command
 		// bytes only from here on.

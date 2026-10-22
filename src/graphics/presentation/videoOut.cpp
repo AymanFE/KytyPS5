@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
+#include "common/paceLog.h"
 #include "common/logging/log.h"
 #include "common/hangTrace.h"
 #include "common/liveSwitch.h"
@@ -1069,6 +1070,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 
 	pending.push_back(r);
 	request_id = r.id;
+	PaceLog::NoteReserve(r.id);
 
 	cfg.flip_status.flipPendingNum++;
 	cfg.flip_status.submitProcessTimeCounter = r.submit_ptc;
@@ -1252,6 +1254,7 @@ void FlipQueue::Complete(uint64_t request_id) {
 			EXIT("completed GPU flip has no prepared recording, id=%" PRIu64 "\n", request_id);
 		}
 		request->state = RequestState::Ready;
+		PaceLog::NoteReady(request_id);
 		m_submit_cond_var.Signal();
 		m_mutex.Unlock();
 		return;
@@ -1310,6 +1313,7 @@ static Live::Switch g_present_unlocked("KYTY_PRESENT_UNLOCKED", Live::ParseDefau
 bool FlipQueue::Flip(uint32_t micros) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
+	const uint64_t pace_tick = PaceLog::Enabled() ? PaceLog::NowNs() : 0;
 	m_mutex.Lock();
 	if (m_requests.empty()) {
 		m_submit_cond_var.WaitFor(&m_mutex, micros);
@@ -1360,11 +1364,14 @@ bool FlipQueue::Flip(uint32_t micros) {
 		return current;
 	};
 	bool due = lock_ports();
+	uint64_t pace_cost = 0;
 	std::array<Graphics::Presenter::Layer, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> layers {};
+	uint64_t pace_vblank = 0;
 	for (size_t i = 0; i < count; i++) {
 		auto& r = requests[i];
 		if (r.id == group) {
 			due &= IsFlipDueLocked(*r.cfg, r.generation);
+			pace_vblank = r.cfg->vblank_status.count;
 		}
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
@@ -1374,7 +1381,9 @@ bool FlipQueue::Flip(uint32_t micros) {
 				requests[i - 1].cfg->mutex.Unlock();
 			}
 		}
+		const uint64_t present_begin = pace_tick != 0 ? PaceLog::NowNs() : 0;
 		m_presenter.Present(std::span(layers.data(), count));
+		pace_cost = pace_tick != 0 ? PaceLog::NowNs() - present_begin : 0;
 		if (present_unlocked) {
 			due = lock_ports();
 		}
@@ -1424,6 +1433,9 @@ bool FlipQueue::Flip(uint32_t micros) {
 		// GPU busy/idle totals before the aggregate snapshot below is published.
 		Graphics::GpuOpProfiler::OnGuestFlip();
 		Graphics::GpuTiming::OnGuestFlip();
+		if (pace_tick != 0) {
+			PaceLog::NotePresent(group, pace_vblank, pace_tick, pace_cost);
+		}
 		// With the hang trace: guest timestamp rewrites, timer-ring deltas and the DRS state.
 		Graphics::EopTimestamps::OnGuestFlip();
 		Profiler::PublishFrameWork();

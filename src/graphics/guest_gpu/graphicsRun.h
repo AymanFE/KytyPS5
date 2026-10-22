@@ -115,6 +115,7 @@ private:
 		bool                      slice_progress    = false; // the last slice advanced
 		uint64_t                  flip_request_id   = 0;
 		uint64_t                  enqueue_ns        = 0;
+		uint64_t                  pace_enqueue_ns   = 0; // KYTY_PACE_LOG (steady clock)
 		uint64_t                  sequence          = 0; // admission order (m_queue_mutex)
 		// Last sequence admitted before the latest Done at admission (KYTY_FRAME_FENCE): the
 		// submission starts only after all of those have completed. 0 = no fence.
