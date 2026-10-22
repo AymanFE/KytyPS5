@@ -1542,6 +1542,9 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 			EXIT("Failed to apply game cheat\n");
 		}
 	}
+	if (!m_programs.empty()) {
+		GamePatch::ApplyBuiltin(m_programs.front());
+	}
 	if (!m_programs.empty() && !m_programs.front()->elf->IsShared()) {
 		Common::GuestProbe::Arm(m_programs.front()->base_vaddr, m_programs.front()->base_size);
 	}

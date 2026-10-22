@@ -331,6 +331,13 @@ peak`), split into the emulator's packets ("library") and the game's own data ("
 crash report also prints the 64 bytes at each register that points to memory; for this crash `[rbx]` is the full
 buffer's state. Send the console text from the last summary line on. The diagnostic costs a little speed.
 
+Since the 2026-10-22 fix the emulator doubles these buffers for Astro Bot 01.018.000 before the game starts
+(`KYTY_ASTRO_CB_SCALE`, default `2`; `1` keeps the game's sizes, `3`/`4` scale further; the console prints
+`Game patch: Astro Bot draw-thread command buffers x2`). The game's Draw Geometry thread uploads its mesh-deformer bone
+palettes into this buffer; when the thread falls a frame behind, one buffer takes two frames of that work (about
+11.5 MiB in speedrun_inflator, where 7 MiB ran full on every boot). On dual-CCD X3D processors the game's threads now
+also use the second CCD (`KYTY_VCACHE_GUEST=all`, default; `hot` keeps them on the V-cache CCD as in int19.3-int20).
+
 ## Caveats
 
 - Program caches are reused only from a build with the same shader translation. Otherwise the first launch of each
