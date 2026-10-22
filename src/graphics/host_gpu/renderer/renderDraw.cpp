@@ -2304,9 +2304,67 @@ static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInf
 // because the picture is all it changes: no stage writes guest memory or images (DrawRunProgramEligible),
 // no guest occlusion query counts its samples, it clears no depth or stencil, it is no mesh draw,
 // and it renders to tiled images only (the CPU reads linear ones back).
+// KYTY_PIPELINE_SKIP_RECURRENT (default on): a skipped draw is lost for good when its target is
+// not drawn again, e.g. a sky or probe texture rendered once at level start (Sky Garden's sky
+// stayed black after a shader-cache invalidation). Only draws whose every target was already a
+// render target in at least two earlier presented frames may be skipped; the others wait.
+static bool SkipRecurrentTargetsOnly() {
+	static const bool on = [] {
+		const auto* value = std::getenv("KYTY_PIPELINE_SKIP_RECURRENT");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return on;
+}
+
+// Notes the draw's render targets for the rule above (once per image and frame).
+static void NoteSkipTargets(RenderContext& context, const DrawRenderState& state) {
+	auto&      cache = context.GetTextureCache();
+	const auto frame = cache.Frame() + 1u; // 0 = never
+	const auto note  = [&](ImageId id) {
+		if (!id) {
+			return;
+		}
+		auto* image = cache.TryGetImage(id);
+		if (image != nullptr && image->skip_target_frame != frame) {
+			image->skip_target_frame  = frame;
+			image->skip_target_frames = std::min<uint32_t>(image->skip_target_frames + 1u, 1000u);
+		}
+	};
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		note(state.color_info[i].image_id);
+	}
+	note(state.depth_info.image_id);
+}
+
+static bool TargetsRecurrent(RenderContext& context, const DrawRenderState& state) {
+	auto&      cache     = context.GetTextureCache();
+	const auto frame     = cache.Frame() + 1u;
+	const auto recurrent = [&](ImageId id) {
+		if (!id) {
+			return true;
+		}
+		const auto* image = cache.TryGetImage(id);
+		if (image == nullptr) {
+			return false;
+		}
+		// Earlier frames only: the current frame was noted before this check.
+		const auto earlier = image->skip_target_frames - (image->skip_target_frame == frame ? 1u : 0u);
+		return earlier >= 2u;
+	};
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (!recurrent(state.color_info[i].image_id)) {
+			return false;
+		}
+	}
+	return recurrent(state.depth_info.image_id);
+}
+
 static bool DrawOnlyChangesPicture(RenderContext& context, const DrawRenderState& state,
                                    std::span<const ShaderVertexInputInfo> vertex_stages, bool mesh_active) {
 	if (mesh_active || vertex_stages.size() != 1 || context.GetOcclusionCounter().Active()) {
+		return false;
+	}
+	if (SkipRecurrentTargetsOnly() && !TargetsRecurrent(context, state)) {
 		return false;
 	}
 	for (const auto& stage: vertex_stages) {
@@ -4033,6 +4091,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// built for and no pipeline was replaced since (DrawPrep::PlannedPipeline).
 	auto&       pipeline_cache = m_context.GetPipelineCache();
 	const auto  colors_span    = std::span<const RenderColorInfo> {state.color_info, state.color_count};
+	if (pipeline_cache.PipelineSkipEnabled() && SkipRecurrentTargetsOnly()) {
+		NoteSkipTargets(m_context, state);
+	}
 	const auto* ps_input       = state.ps_active ? &state.ps_input_info : nullptr;
 	const auto* planned_pipeline =
 	    plan_stages && plan->pipeline != nullptr

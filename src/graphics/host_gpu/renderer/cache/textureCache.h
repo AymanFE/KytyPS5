@@ -215,6 +215,9 @@ public:
 	// a frame spans hundreds of scheduler ticks, so tick age alone treats every alias used
 	// earlier in the same frame as stale.
 	void AdvanceFrame() noexcept { m_frame.fetch_add(1, std::memory_order_relaxed); }
+	[[nodiscard]] uint64_t Frame() const noexcept { return m_frame.load(std::memory_order_relaxed); }
+	// The image of a slot id, or nullptr when the slot is free (GPU thread).
+	[[nodiscard]] Image* TryGetImage(ImageId id) noexcept { return m_slot_images.try_get(id); }
 	void RunGarbageCollector();
 	// KYTY_VRAM_STATS report lines (vramStats.h): images by binding kind, frame age, residency,
 	// render-target sizes and aliases, the largest images, the GC thresholds (GPU thread).
