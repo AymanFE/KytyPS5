@@ -1033,6 +1033,15 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			}
 			return;
 		}
+		case ValueOpcode::FindILsb32: {
+			// Upstream 4a1440197 lowers S_FF1/FLBIT_I32_B64 through FindILsb32.
+			const auto value = Arg(inst, 0);
+			if (IsImmediate(value, Type::U32)) {
+				const auto bits = value.U32();
+				Replace(inst, Value(static_cast<uint32_t>(bits == 0u ? -1 : std::countr_zero(bits))));
+			}
+			return;
+		}
 		case ValueOpcode::BitCount64: {
 			const auto value = Arg(inst, 0);
 			if (IsImmediate(value, Type::U64)) {
@@ -1049,7 +1058,9 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			});
 			return;
 		case ValueOpcode::UMin32:
-			FoldU32(inst, [](uint32_t a, uint32_t b) { return std::min(a, b); });
+			if (!FoldU32(inst, [](uint32_t a, uint32_t b) { return std::min(a, b); })) {
+				ReplaceBinaryIdentity(inst, Type::U32, ~0u);
+			}
 			return;
 		case ValueOpcode::UMax32:
 			FoldU32(inst, [](uint32_t a, uint32_t b) { return std::max(a, b); });

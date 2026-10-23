@@ -1308,12 +1308,11 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 	             m_interrupt_event_id == 0 ? 0u : static_cast<uint32_t>(m_interrupt_event_id - 0x20 + 1));
 
 	StreamCopyDefer::NoteGuestWrite(op.dst, write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u);
-	if (write_one_address) {
-		for (uint32_t i = 0; i < dw_num; i++) {
-			dst[0] = src[i];
-		}
-	} else {
-		memcpy(dst, src, static_cast<size_t>(dw_num) * sizeof(uint32_t));
+	// Completion labels can be reused immediately; memcpy may write a destination twice.
+	auto* output = static_cast<volatile uint32_t*>(dst);
+	for (uint32_t i = 0; i < dw_num; i++) {
+		*output = src[i];
+		output += !write_one_address;
 	}
 	NoteCpWrite(op.dst, write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u);
 }

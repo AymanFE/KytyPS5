@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/hangTrace.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
@@ -16,6 +17,7 @@
 #include "graphics/host_gpu/memoryStats.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/texelImageLookup.h"
+#include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
@@ -58,6 +60,8 @@ namespace Libs::Graphics {
 namespace {
 
 constexpr uint64_t NumFramesBeforeRemoval = 32;
+// Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
+constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
 
 // The DccImageState* cause in the DCC CPU fallback's stderr line.
 const char* DccImageStateName(Profiler::FrameEvent cause) {
@@ -394,7 +398,8 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
       m_blit_helper(graphics, scheduler),
       m_tiler(graphics, scheduler, buffer_cache.GetUtilityBuffer(MemoryUsage::Stream)),
       m_buffer_cache(buffer_cache),
-      m_readback_linear_images(Config::ReadbackLinearImagesEnabled()) {
+      m_readback_linear_images(Config::ReadbackLinearImagesEnabled()),
+      m_readback_tiled_images(Config::ReadbackTiledImagesEnabled()) {
 	m_image_page_counts = std::make_unique<std::atomic<uint32_t>[]>(
 	    size_t {1} << (ImagePageTable::kAddressSpaceBits - ImagePageTable::kPageBits));
 	m_fault_fast_path = EnvNotZero("KYTY_TEXTURE_FAULT_FAST_PATH");
@@ -1801,7 +1806,14 @@ void TextureCache::UntrackImageTail(ImageId id) {
 }
 
 void TextureCache::TrackImageDownload(ImageId id, Image& image) {
-	if (m_readback_linear_images && !image.info.IsTiled() && !image.info.data.Empty()) {
+	// Small tiled targets are written back too: games read GPU results such as reductions and
+	// simulation state from them on the CPU (PPSA04263 keeps the origin of its ocean wave grid
+	// in a 1x1 R32G32 target, and its water physics read it to sample the wave heights).
+	const auto& info   = image.info;
+	const auto  texels = static_cast<uint64_t>(info.extent.width) * info.extent.height *
+	                     info.extent.depth * info.resources.layers;
+	if (!info.data.Empty() && (info.IsTiled() ? m_readback_tiled_images && texels <= SmallTiledReadbackTexels
+	                                         : m_readback_linear_images)) {
 		if (!image.IsGpuModified()) {
 			EXIT("TextureCache: cannot enroll a non-GPU-owned image for download\n");
 		}
@@ -2668,6 +2680,7 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 		}
 	}
 	upload(copies, linear);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear.size);
 }
 
 void TextureCache::InitializeImage(ImageId id, RefreshIntent intent) {
@@ -3814,7 +3827,8 @@ void TextureCache::MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
 	const auto& view   = desc.view_info;
 	const auto  layers = desc.info.TransferLayers();
 	if (!range.Valid() || layers == 0 || range.size % layers != 0 || (range.size / layers) % 4 != 0 ||
-	    desc.info.resources.levels != 1 || desc.info.IsVolume() || desc.info.samples != 1 ||
+	    desc.info.resources.levels != 1 || desc.info.IsVolume() ||
+	    (desc.info.samples != 1 && !CmaskMsaaEnabled()) ||
 	    view.layer_count == 0 || metadata_base_layer >= layers ||
 	    view.layer_count > layers - metadata_base_layer) {
 		Profiler::CountFrameEvent(Event::CmaskFastClearShape);
@@ -5878,6 +5892,7 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	destination.Flush(offset, range.size);
 
 	DownloadImage(image, destination, offset, range.size, std::move(transfer));
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureDownloadBytes, range.size);
 	vk::BufferMemoryBarrier barrier {};
 	barrier.srcAccessMask = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eTransferWrite |
 	                        vk::AccessFlagBits::eShaderWrite;
@@ -6714,6 +6729,7 @@ void TextureCache::RunGarbageCollector() {
 				}
 			}
 			FreeImage(id, HangTrace::ImageFreeReason::GarbageCollect);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureEvictions);
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
 				aggressive = false;
@@ -7025,8 +7041,7 @@ void TextureCache::ReportVram() {
 }
 
 void TextureCache::ProcessDownloadImages() {
-	// Only KYTY/config readback of linear images enrolls downloads (upstream 5b730d4df).
-	if (!m_readback_linear_images) {
+	if (!m_readback_linear_images && !m_readback_tiled_images) {
 		return;
 	}
 	std::scoped_lock lock {m_lock};

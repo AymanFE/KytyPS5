@@ -1035,7 +1035,13 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 			                    static_cast<uint32_t>(db.z_info.format));
 		}
 	}
+	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state = state;
+	for (auto& color: m_render_state.color_attachments) {
+		color.is_clear = false;
+	}
+	m_render_state.depth_stencil_attachment.depth_clear   = false;
+	m_render_state.depth_stencil_attachment.stencil_clear = false;
 	m_rendering    = true;
 	++m_rendering_serial;
 	m_occlusion_control = count_control;

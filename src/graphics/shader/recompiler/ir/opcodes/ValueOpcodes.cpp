@@ -94,6 +94,7 @@ bool HasSideEffects(ValueOpcode opcode) {
 		case ValueOpcode::SetTessellationAttribute:
 		case ValueOpcode::MeshAllocate:
 		case ValueOpcode::StoreCompletion:
+		case ValueOpcode::DataCacheInvalidate:
 		case ValueOpcode::Barrier:
 		case ValueOpcode::SharedMemoryBarrier: return true;
 		default: return false;
@@ -195,6 +196,7 @@ SharedAccess SharedAccessOf(ValueOpcode opcode) {
 		case ValueOpcode::SharedAtomicSMax32:
 		case ValueOpcode::SharedAtomicUMax32:
 		case ValueOpcode::SharedAtomicUMax64:
+		case ValueOpcode::SharedAtomicCmpSwap32:
 		case ValueOpcode::SharedAtomicCmpSwap64:
 		case ValueOpcode::SharedAtomicAnd32:
 		case ValueOpcode::SharedAtomicOr32:

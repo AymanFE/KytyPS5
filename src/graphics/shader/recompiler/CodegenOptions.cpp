@@ -28,6 +28,9 @@ CodegenOptions FromEnvironment() {
 	options.short_f32_helpers  = EnvFlag("KYTY_SHORT_F32_HELPERS", options.short_f32_helpers);
 	options.fast_float_min_max = EnvFlag("KYTY_FAST_FMINMAX", options.fast_float_min_max);
 	options.native_float_min_max = EnvFlag("KYTY_NATIVE_FMINMAX", options.native_float_min_max);
+	options.dcache_invalidate = EnvFlag("KYTY_DCACHE_INV", options.dcache_invalidate);
+	options.readfirstlane_exec_zero =
+	    EnvFlag("KYTY_READFIRSTLANE_EXEC0", options.readfirstlane_exec_zero);
 	options.uniform_buffers      = EnvFlag("KYTY_UNIFORM_BUFFERS", options.uniform_buffers);
 	options.wave64_warps         = EnvFlag("KYTY_WAVE64_WARPS", options.wave64_warps);
 	options.fast_pkrtz         = EnvFlag("KYTY_FAST_PKRTZ", options.fast_pkrtz);

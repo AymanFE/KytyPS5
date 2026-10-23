@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -675,6 +677,43 @@ static void audioout2_trace_block_locked(AudioOut2PortStateEntry* state) {
 	b.gain_changes  = 0;
 }
 
+// KYTY_AUDIO2_UNLOCKED_PUSH=1 (default off; upstream b46eeb786, PPSA09809): a push copies what it
+// hands the backend into its context's submission and drops g_audioout2_port_mutex before the
+// backend call, which can block while pacing, so one context's push no longer stalls the others
+// (and port calls) for that time. Destroying a port or context waits for its in-flight push.
+static bool audioout2_unlocked_push() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_AUDIO2_UNLOCKED_PUSH");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
+struct AudioOut2Submission {
+	Common::Mutex                                                    mutex;
+	std::array<std::vector<uint8_t>, AudioInternal::OUT_PORTS_MAX>   pcm;
+	std::array<std::array<float, 16>, AudioInternal::OUT_PORTS_MAX>  gains {};
+	std::vector<float>                                               mix;
+};
+
+static AudioOut2Submission& audioout2_submission(AudioOut2ContextHandle ctx) {
+	static std::mutex                                                                 map_mutex;
+	static std::unordered_map<AudioOut2ContextHandle, std::unique_ptr<AudioOut2Submission>> map;
+	std::lock_guard lock(map_mutex);
+	auto& entry = map[ctx];
+	if (entry == nullptr) {
+		entry = std::make_unique<AudioOut2Submission>();
+	}
+	return *entry;
+}
+
+// Waits for an in-flight unlocked push of `ctx` that may still use its output handles.
+static void audioout2_wait_submission(AudioOut2ContextHandle ctx) {
+	if (audioout2_unlocked_push()) {
+		Common::LockGuard wait(audioout2_submission(ctx).mutex);
+	}
+}
+
 static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
 	// The backend consumes the buffers synchronously, but can block while pacing SDL's queue.
 	// Keep both PCM storage and port handles alive until it returns.
@@ -683,7 +722,12 @@ static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool block
 
 	thread_local std::vector<float> object_mix;
 
-	Common::LockGuard lock(g_audioout2_port_mutex);
+	const bool           unlocked = audioout2_unlocked_push();
+	AudioOut2Submission* out      = unlocked ? &audioout2_submission(ctx) : nullptr;
+	if (out != nullptr) {
+		out->mutex.Lock();
+	}
+	g_audioout2_port_mutex.Lock();
 	// Objects switched off: no bed takes them, so every object block is dropped below.
 	const bool objects_on    = AudioInternal::AudioOutObjectsEnabled();
 	bool       objects_mixed = false;
@@ -705,8 +749,23 @@ static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool block
 				objects_mixed = true;
 			}
 			// A mixed bed already carries its gains.
+			const bool own_pcm = data == state.pcm_data.data();
+			if (out != nullptr) {
+				// Copies: the port lock is released before the backend reads them.
+				const auto i = params.size();
+				if (own_pcm) {
+					out->pcm[i].assign(state.pcm_data.begin(), state.pcm_data.end());
+				} else {
+					out->mix.assign(object_mix.begin(), object_mix.end());
+				}
+				out->gains[i] = state.gains;
+				data = own_pcm ? static_cast<const void*>(out->pcm[i].data())
+				               : static_cast<const void*>(out->mix.data());
+			}
 			params.push_back(AudioInternal::OutputParam {
-			    state.audio_handle, data, data == state.pcm_data.data() ? state.gains.data() : nullptr});
+			    state.audio_handle, data,
+			    own_pcm ? (out != nullptr ? out->gains[params.size()].data() : state.gains.data())
+			            : nullptr});
 		}
 	}
 	if (!objects_mixed) {
@@ -718,10 +777,20 @@ static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool block
 		}
 	}
 
+	if (out != nullptr) {
+		g_audioout2_port_mutex.Unlock();
+		if (!params.empty()) {
+			(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
+			                                     blocking);
+		}
+		out->mutex.Unlock();
+		return;
+	}
 	if (!params.empty()) {
 		(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
 		                                     blocking);
 	}
+	g_audioout2_port_mutex.Unlock();
 }
 
 static void audioout2_close_audio_handle(int audio_handle) {
@@ -843,6 +912,7 @@ int KYTY_SYSV_ABI AudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
 	}
 	g_audioout2_port_mutex.Unlock();
 
+	audioout2_wait_submission(ctx);
 	for (const int audio_handle: audio_handles) {
 		audioout2_close_audio_handle(audio_handle);
 	}
@@ -1202,6 +1272,9 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(AudioOut2PortHandle port) {
 		            port_type, audio_handle);
 	}
 
+	if (found && audio_handle > 0) {
+		audioout2_wait_submission(context);
+	}
 	audioout2_close_audio_handle(audio_handle);
 
 	return OK;

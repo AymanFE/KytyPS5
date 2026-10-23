@@ -561,6 +561,8 @@ enum class Opcode {
 	BUFFER_LOAD_FORMAT_XYZ,
 	BUFFER_LOAD_FORMAT_XYZW,
 	BUFFER_LOAD_FORMAT_D16_X,
+	BUFFER_LOAD_FORMAT_D16_XY,
+	BUFFER_LOAD_FORMAT_D16_XYZ,
 	BUFFER_LOAD_FORMAT_D16_XYZW,
 	BUFFER_STORE_FORMAT_X,
 	BUFFER_STORE_FORMAT_XY,
@@ -568,6 +570,8 @@ enum class Opcode {
 	BUFFER_STORE_FORMAT_XYZW,
 	BUFFER_STORE_FORMAT_D16_X,
 	BUFFER_STORE_FORMAT_D16_HI_X,
+	BUFFER_STORE_FORMAT_D16_XY,
+	BUFFER_STORE_FORMAT_D16_XYZ,
 	BUFFER_STORE_FORMAT_D16_XYZW,
 	BUFFER_LOAD_UBYTE,
 	BUFFER_LOAD_UBYTE_D16,
@@ -600,6 +604,7 @@ enum class Opcode {
 	BUFFER_ATOMIC_CMPSWAP,
 	BUFFER_ATOMIC_SWAP_X2,
 	BUFFER_ATOMIC_ADD,
+	BUFFER_ATOMIC_ADD_X2,
 	BUFFER_ATOMIC_SUB,
 	BUFFER_ATOMIC_SMIN,
 	BUFFER_ATOMIC_UMIN,
@@ -613,7 +618,6 @@ enum class Opcode {
 	BUFFER_ATOMIC_INC,
 	BUFFER_ATOMIC_DEC,
 	BUFFER_ATOMIC_CMPSWAP_X2,
-	BUFFER_ATOMIC_ADD_X2,
 	BUFFER_ATOMIC_SUB_X2,
 	BUFFER_ATOMIC_SMIN_X2,
 	BUFFER_ATOMIC_UMIN_X2,
@@ -657,6 +661,7 @@ enum class Opcode {
 	DS_MAX_U32,
 	DS_MAX_RTN_U32,
 	DS_MAX_RTN_U64,
+	DS_CMPST_RTN_B32,
 	DS_CMPST_RTN_B64,
 	DS_AND_B32,
 	DS_AND_RTN_B32,
@@ -740,6 +745,8 @@ enum class Opcode {
 	V_INTERP_P1_F32,
 	V_INTERP_P2_F32,
 	V_INTERP_MOV_F32,
+	V_INTERP_P1LL_F16,
+	V_INTERP_P2_F16,
 
 	S_NOP,
 	S_WAITCNT,
@@ -914,6 +921,7 @@ void DecodeProgram(std::span<const uint32_t> code, Program& program, bool decode
 [[nodiscard]] bool IsBvhIntersect(const Instruction& inst);
 bool IsConditionalBranch(Opcode opcode);
 bool IsDirectBranch(Opcode opcode);
+bool IsDsWriteOpcode(Opcode opcode);
 
 void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand);
 void DecodeScalarDestination(uint32_t code, uint32_t pc, Operand& operand);

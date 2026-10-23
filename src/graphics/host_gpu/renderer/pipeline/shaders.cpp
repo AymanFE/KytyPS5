@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 
@@ -426,6 +427,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	multisampling.sampleShadingEnable  = static_params.sample_shading_enable ? VK_TRUE : VK_FALSE;
 	multisampling.rasterizationSamples = vulkan_sample_count(static_params.samples);
 	multisampling.minSampleShading     = 1.0f;
+	multisampling.alphaToCoverageEnable =
+	    static_params.alpha_to_coverage_enable ? VK_TRUE : VK_FALSE;
 
 	vk::PipelineColorBlendAttachmentState color_blend_attachment[RENDER_COLOR_ATTACHMENTS_MAX] = {};
 	for (uint32_t i = 0; i < rendering.color_count; i++) {
@@ -670,6 +673,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	vk::Result result = vk::Result::eSuccess;
 
 	vk::ComputePipelineCreateInfo info {};
+	// KYTY_ORDERED_APPEND: GDS programs may run per workgroup through vkCmdDispatchBase.
+	if (OrderedAppendSplitEnabled() && input_info.stage.program != nullptr &&
+	    (ShaderRecompiler::IR::FindBinding(input_info.stage.program->bindings, ShaderRecompiler::IR::DescriptorBindingKind::Gds) != nullptr)) {
+		info.flags = vk::PipelineCreateFlagBits::eDispatchBase;
+	}
 	info.stage             = comp_shader_stage_info;
 	info.layout            = pipeline.pipeline_layout;
 	info.basePipelineIndex = -1;

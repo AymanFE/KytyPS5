@@ -392,6 +392,8 @@ constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
     {0x377u, Opcode::V_PERMLANE16_B32},
     {0x378u, Opcode::V_PERMLANEX16_B32},
     {0x34bu, Opcode::V_FMA_F16},
+    {0x342u, Opcode::V_INTERP_P1LL_F16},
+    {0x35au, Opcode::V_INTERP_P2_F16},
     {0x36du, Opcode::V_ADD3_U32},
     {0x14fu, Opcode::V_ALIGNBYTE_B32},
 };
@@ -1562,6 +1564,9 @@ bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mi
 	}
 	switch (opcode) {
 		case Opcode::V_LDEXP_F32: return (abs & ~1u) != 0u || op_sel != 0u || (neg & ~1u) != 0u;
+		case Opcode::V_INTERP_P1LL_F16:
+		case Opcode::V_INTERP_P2_F16:
+			return abs != 0u || (op_sel & 0x7u) != 0u || clamp != 0u || omod != 0u || neg != 0u;
 		case Opcode::V_CNDMASK_B32:
 			return (abs & ~0x3u) != 0u || op_sel != 0u || clamp != 0u || omod != 0u ||
 			       (neg & ~0x3u) != 0u;
@@ -1839,6 +1844,24 @@ void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	if (inst.opcode == Opcode::V_NOP) {
 		inst.dst.kind  = OperandKind::Null;
 		inst.src_count = 0;
+		return;
+	}
+	if (inst.opcode == Opcode::V_INTERP_P1LL_F16 || inst.opcode == Opcode::V_INTERP_P2_F16) {
+		// SRC0 packs {attr_word, attr_chan, attr}; attr_word selects the high f16 of the dword.
+		// The VINTRP layout: src0 = I/J VGPR, src1 = attr, src2 = chan.
+		DecodeVectorGpr(vdst, inst.dst);
+		DecodeScalarSource(src1, pc, inst.src0);
+		const uint32_t attr  = src0 & 0x3fu;
+		const uint32_t chan  = (src0 >> 6u) & 0x3u;
+		inst.src1.kind       = OperandKind::IntegerInlineConstant;
+		inst.src1.value      = attr;
+		inst.src1.signed_val = static_cast<int32_t>(attr);
+		inst.src2.kind       = OperandKind::IntegerInlineConstant;
+		inst.src2.value      = chan;
+		inst.src2.signed_val = static_cast<int32_t>(chan);
+		inst.src_count       = 3;
+		inst.src1.op_sel     = (src0 & 0x100u) != 0u;
+		inst.dst.sdwa_sel    = (op_sel & 0x8u) != 0u ? 5u : 4u;
 		return;
 	}
 	if (compare_exec) {

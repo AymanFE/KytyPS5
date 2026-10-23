@@ -562,6 +562,9 @@ struct CommandRecorder::NativeExecutor {
 		                                 stride);
 	}
 	void dispatch(uint32_t x, uint32_t y, uint32_t z) { command.dispatch(x, y, z); }
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) {
+		command.dispatchBase(bx, by, bz, x, y, z);
+	}
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) {
 		command.dispatchIndirect(buffer, offset);
 	}

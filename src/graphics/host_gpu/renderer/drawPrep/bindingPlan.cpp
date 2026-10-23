@@ -83,6 +83,11 @@ bool PlanRanges(const CompiledShaderInfo& program, const ResourceSnapshot& resou
 		if (LibKernel::Memory::ClampRangeSizeQuiet(address, requested_size) != requested_size) {
 			return false;
 		}
+		// KYTY_BUFFER_RANGE_FIXES' zero-stride payload rule: left to the serial path.
+		if (BufferRangeFixesEnabled() && descriptor.Stride() == 0 && descriptor.OutOfBounds() == 2 &&
+		    !program.info.buffers[i].scalar && program.info.buffers[i].max_byte_extent > requested_size) {
+			return false;
+		}
 		range.address = address;
 		range.size    = requested_size;
 	}

@@ -99,6 +99,15 @@ void ValidateValueReferences(const Program& program, ShaderStageInputInfo input_
 					}
 					break;
 				}
+				case ValueOpcode::GetAttributeF16: {
+					if (program.stage != ShaderType::Pixel || !inst.Arg(0).IsImmediate() ||
+					    inst.Arg(0).GetType() != Type::U32 || !inst.Arg(1).IsImmediate() ||
+					    inst.Arg(1).GetType() != Type::U32 || !inst.Arg(2).IsImmediate() ||
+					    inst.Arg(1).U32() >= 4u || inst.Arg(0).U32() >= input_info.pixel->input_num) {
+						return Fail("f16 attribute reference is invalid");
+					}
+					break;
+				}
 				case ValueOpcode::GetInterpolationParameter: {
 					if (program.stage != ShaderType::Pixel || !inst.Arg(0).IsImmediate() ||
 					    inst.Arg(0).GetType() != Type::U32 || !inst.Arg(1).IsImmediate() ||
@@ -225,6 +234,11 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 			if (inst.GetOpcode() == ValueOpcode::GetAttribute) {
 				used[inst.Arg(0).U32()] = true;
 				interpolated[inst.Arg(0).U32()] = true;
+			} else if (inst.GetOpcode() == ValueOpcode::GetAttributeF16) {
+				// Packed halves cannot be interpolated by the host: smooth inputs read raw vertices.
+				const auto input = inst.Arg(0).U32();
+				used[input]       = true;
+				per_vertex[input] = per_vertex[input] || !ShaderPixelParameterIsFlat(*pixel, input);
 			} else if (inst.GetOpcode() == ValueOpcode::GetInterpolationParameter) {
 				const auto input = inst.Arg(0).U32();
 				const auto mode  = inst.Arg(2).U32();

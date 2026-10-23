@@ -1498,12 +1498,8 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 			mutex->count++;
 			return OK;
 		}
-		if (timeout_us != nullptr) {
-			if (*timeout_us > 0) {
-				mutex->cv.wait_for(lock, std::chrono::microseconds(*timeout_us));
-			}
-			return ETIMEDOUT;
-		}
+		// A non-recursive self lock reports EDEADLK at once, timed or not (upstream e87fb8c85's
+		// change of this case; its FIFO hand-off is not taken).
 		return EDEADLK;
 	}
 
@@ -1511,6 +1507,21 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 	if (!MutexMayTake(mutex, self))
 		blocked.emplace("guest-mutex", reinterpret_cast<uint64_t>(mutex),
 		                reinterpret_cast<uint64_t>(self), reinterpret_cast<uint64_t>(mutex->owner));
+	// Guest mutex waits are not cancellation points, unlike the host condition wait (upstream
+	// e87fb8c85's cancellation part; its FIFO hand-off is not taken). Only a waiting lock pays.
+	struct CancelStateGuard {
+		int  previous = 0;
+		bool active   = false;
+		~CancelStateGuard() {
+			if (active) {
+				::pthread_setcancelstate(previous, nullptr);
+			}
+		}
+	} cancel_state;
+	if (blocked) {
+		::pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state.previous);
+		cancel_state.active = true;
+	}
 	const auto wait_start = std::chrono::steady_clock::now();
 	bool       starving   = false;
 	if (timeout_us == nullptr) {
@@ -3625,6 +3636,11 @@ int KYTY_SYSV_ABI PthreadCancel(Pthread thread) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// A joined thread's native handle is gone; the guest may still hold its handle.
+	if (thread->free) {
+		return KERNEL_ERROR_ESRCH;
+	}
+
 	int result = pthread_cancel(thread->p);
 
 	LOGF("\tthread cancel: %s, %d\n", thread->name.c_str(), result);
@@ -3728,10 +3744,8 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio) {
 
 	EXIT_NOT_IMPLEMENTED(prio == nullptr);
 
-	sched_param native_param {};
-	int         native_policy = 0;
-	if (pthread_getschedparam(thread->p, &native_policy, &native_param) != 0) {
-		return KERNEL_ERROR_EINVAL;
+	if (thread->free) {
+		return KERNEL_ERROR_ESRCH;
 	}
 
 	*prio = thread->attr->guest_priority;
@@ -3745,6 +3759,11 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio) {
 	PRINT_NAME();
 
 	if (thread == nullptr) {
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	// A joined thread's native handle is gone; the guest may still hold its handle.
+	if (thread->free) {
 		return KERNEL_ERROR_ESRCH;
 	}
 

@@ -822,7 +822,7 @@ static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx) {
 static bool PixelShaderHasDepthOrCoverageSideEffects(const HW::ShaderRegisters& sh_regs) {
 	const auto& db = sh_regs.db_shader_control;
 	return db.shader_kill_enable || db.shader_z_export_enable || db.shader_mask_export_enable ||
-	       db.shader_dual_export_enable || db.shader_execute_on_noop;
+	       db.shader_dual_export_enable || db.shader_execute_on_noop || sh_regs.AlphaToMask();
 }
 
 // One per RenderExecutor, reused by every draw instead of being value-initialised (tens of KB)
@@ -952,7 +952,12 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		const bool meta_clear =
 		    metadata.kind == ImageMetadataKind::Htile &&
 		    cache.IsMetaCleared(metadata.range.address, depth.desc.view_info.base_layer);
-		depth.depth_load_clear_enable = depth.depth_clear_enable || meta_clear;
+		depth.load_clear_aspects = {};
+		if (depth.depth_clear_enable || meta_clear)
+			depth.load_clear_aspects |= vk::ImageAspectFlagBits::eDepth;
+		// Apply pending clears to compressed stencil as well as depth (upstream 5bf37f52a).
+		if (depth.stencil_clear_enable || (meta_clear && metadata.stencil_compressed))
+			depth.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
 		if (meta_clear &&
 		    !cache.TouchMeta(metadata.range.address, depth.desc.view_info.base_layer, false)) {
 			EXIT("failed to consume HTile clear state\n");
@@ -1083,9 +1088,11 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		attachment.clear_value[0] = std::bit_cast<uint32_t>(depth.depth_clear_value);
 		attachment.clear_value[1] = depth.stencil_clear_value;
 		attachment.has_depth      = static_cast<bool>(aspects & vk::ImageAspectFlagBits::eDepth);
-		attachment.depth_clear    = depth.depth_load_clear_enable;
+		attachment.depth_clear =
+		    static_cast<bool>(depth.load_clear_aspects & vk::ImageAspectFlagBits::eDepth);
 		attachment.has_stencil    = static_cast<bool>(aspects & vk::ImageAspectFlagBits::eStencil);
-		attachment.stencil_clear  = depth.stencil_clear_enable;
+		attachment.stencil_clear =
+		    static_cast<bool>(depth.load_clear_aspects & vk::ImageAspectFlagBits::eStencil);
 	}
 	depth_scope.Stop();
 	if (color_count == 0 && !depth.image_id) {
@@ -1201,7 +1208,9 @@ bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer,
 		// single sample.
 		const bool eligible = materialize && (dcc || cmask) &&
 		                      rt.attrib3.tile_mode == Prospero::TileMode::kRenderTarget &&
-		                      rt.attrib.num_samples == 0 && rt.attrib.num_fragments == 0;
+		                      ((rt.attrib.num_samples == 0 && rt.attrib.num_fragments == 0) ||
+		                       (cmask && !dcc && CmaskMsaaEnabled() &&
+		                        rt.attrib.num_samples == rt.attrib.num_fragments));
 		uint64_t image_size = 0;
 		if (eligible) {
 			RenderColorInfo target {};
@@ -2266,6 +2275,32 @@ void RenderExecutor::DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& d
 			state.depth_info = reference;
 		}
 	}
+	// Upstream 7b7294aa0 (TODO PPSA09243): Vulkan passes take one sample count. Where PS5
+	// attachments mix counts, keep those matching the raster count instead of resolving
+	// multisampled shadows. Draws with one sample count (all Astro Bot draws seen) skip this.
+	if (state.color_count != 0 || state.depth_info.image_id) {
+		const auto colors       = std::span {state.color_info, state.color_count};
+		const auto pass_samples = state.depth_info.image_id ? state.depth_info.desc.info.samples
+		                                                    : state.color_info[0].desc.info.samples;
+		if (std::ranges::any_of(colors, [&](const RenderColorInfo& color) {
+			    return color.desc.info.samples != pass_samples;
+		    })) {
+			const auto raster =
+			    render_sample_count(buffer.GetRegisters().GetAaConfig().msaa_num_samples);
+			const auto dropped = std::ranges::remove_if(colors, [&](const RenderColorInfo& color) {
+				return color.desc.info.samples != raster;
+			});
+			state.color_count -= static_cast<uint32_t>(dropped.size());
+			if (state.depth_info.image_id && state.depth_info.desc.info.samples != raster) {
+				state.depth_info = {};
+			}
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
+				Log::WriteToConsoleAndLog(
+				    "Warning: dropping attachments whose sample count differs from the raster.\n");
+			}
+		}
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2383,7 +2418,7 @@ static bool DrawOnlyChangesPicture(RenderContext& context, const DrawRenderState
 	}
 	const auto& depth = state.depth_info;
 	if (static_cast<bool>(depth.image_id) &&
-	    (!depth.desc.info.IsTiled() || depth.depth_clear_enable || depth.depth_load_clear_enable ||
+	    (!depth.desc.info.IsTiled() || depth.depth_clear_enable || depth.load_clear_aspects ||
 	     depth.stencil_clear_enable)) {
 		return false;
 	}
@@ -3459,7 +3494,7 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	                     state.ps_input_info.ps_sample_mask_export_enable);
 	vk::ImageAspectFlags feedback;
 	const auto rendering = AcquireRenderTargets(buffer, &color, 1, depth, feedback);
-	if (depth.depth_load_clear_enable) {
+	if (depth.load_clear_aspects) {
 		m_context.GetCommandScheduler().BeginRendering(rendering);
 	}
 	auto& cache = m_context.GetTextureCache();
@@ -4384,6 +4419,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwords(
 	                      state.vertex_info[0].mesh.split_groups != 0)
 	                : 0u;
+	// PA_CL_UCP planes (upstream feed075a9): four float dwords per plane up to the highest enabled.
+	if (const auto planes = state.vertex_info[0].user_clip_planes; planes != 0) {
+		uint32_t count = 0;
+		for (uint32_t mask = planes; mask != 0; mask >>= 1u) {
+			count++;
+		}
+		vk_buffer.pushConstants(
+		    pipeline.pipeline_layout,
+		    vk::ShaderStageFlagBits::eFragment |
+		        (mesh_active ? vk::ShaderStageFlagBits::eMeshEXT : vk::ShaderStageFlagBits::eVertex),
+		    ShaderRecompiler::IR::PushData::UserClipPlaneDword * sizeof(uint32_t),
+		    count * 4u * sizeof(uint32_t), buffer.GetRegisters().GetUserClipPlanes().data());
+	}
 	if (mesh_indirect) {
 		// One indirect dispatch per conversion record, each reading its draw dwords from its own
 		// parameter block (a record the draw does not need has no workgroups). Indirect draws are

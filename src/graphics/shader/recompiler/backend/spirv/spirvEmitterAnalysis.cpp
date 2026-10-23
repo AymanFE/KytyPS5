@@ -140,6 +140,9 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 		EXIT("invalid image resource class");
 	}
 	const auto& info = ImageDimensionInfoFor(image.dimension);
+	if (sampled == 2 && info.multisampled != 0u) {
+		state.builder.RequireCapability(spv::CapabilityStorageImageMultisample);
+	}
 	const auto  scalar_type =
 	    image.atomic64 ? TypeU64(state) : ImageScalarType(state, image.numeric_class);
 	return state.builder.Type(spv::OpTypeImage, scalar_type,

@@ -1,6 +1,7 @@
 #include "common/emulatorConfig.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 
 #include <algorithm>
 #include <memory>
@@ -16,6 +17,7 @@ void Initialize() {
 }
 
 void Shutdown() {
+	Common::DebugCounters::SetEnabled(false);
 	g_config.reset();
 }
 
@@ -28,10 +30,12 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.audio_music_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_pad_speaker_main_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_objects_volume > MAX_AUDIO_VOLUME);
+	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
 	*g_config = cfg;
 	Detail::g_graphics_debug_dump_enabled = cfg.graphics_debug_dump_enabled;
 	Detail::g_sync_raw_image_buffers      = cfg.sync_raw_image_buffers;
+	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
 uint32_t GetScreenWidth() {
@@ -88,6 +92,27 @@ uint32_t GetAudioObjectsVolume() {
 
 bool AudioObjectsEnabled() {
 	return g_config->audio_objects_enabled;
+}
+
+uint32_t GetKeyboardPlayer() {
+	return g_config->keyboard_player;
+}
+
+int32_t GetPlayerUserId(int player) {
+	return g_config->user_id + player * PLAYER_USER_ID_STEP;
+}
+
+int GetPlayerFromUserId(int32_t user_id) {
+	for (int player = 0; player < MAX_PLAYERS; player++) {
+		if (user_id == GetPlayerUserId(player)) {
+			return player;
+		}
+	}
+	return -1;
+}
+
+bool IsGuestUserId(int32_t user_id) {
+	return GetPlayerFromUserId(user_id) > 0;
 }
 
 PresentMode GetPresentMode() {
@@ -188,6 +213,10 @@ bool RenderDocEnabled() {
 
 bool ReadbackLinearImagesEnabled() {
 	return g_config->readback_linear_images;
+}
+
+bool ReadbackTiledImagesEnabled() {
+	return g_config->readback_tiled_images;
 }
 
 bool TessellationEnabled() {

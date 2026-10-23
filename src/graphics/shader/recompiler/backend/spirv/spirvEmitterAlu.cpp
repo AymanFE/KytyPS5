@@ -381,7 +381,9 @@ uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1)
 }
 
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
-	return EmitExt(state, TypeF32(state), GLSLstd450FClamp,
+	// The clamp modifier runs in DX10 clamp mode: NaN becomes 0, as NClamp's NMax step does
+	// (upstream 4f1f3b1bb).
+	return EmitExt(state, TypeF32(state), GLSLstd450NClamp,
 	               {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
 }
 

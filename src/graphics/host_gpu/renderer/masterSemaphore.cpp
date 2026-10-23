@@ -4,6 +4,7 @@
 #include "common/hangWatchdog.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 
@@ -108,6 +109,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	                         reinterpret_cast<uint64_t>(static_cast<VkSemaphore>(m_semaphore)),
 	                         tick, HangWatchdog::Enabled() ? KnownGpuTick() : 0, 0,
 	                         HangWatchdog::Enabled() ? CurrentTick() : 0);
+	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
+	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	if (result != vk::Result::eSuccess) {
 		HangWatchdog::Scope error("master-wait-error",

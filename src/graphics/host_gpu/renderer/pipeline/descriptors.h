@@ -93,6 +93,8 @@ struct PreparedBindings {
 // NoteBufferOutOfBoundsMode's combination of a V# (OOB_SELECT, stride, swizzle, ADD_TID): the bit
 // index it logs once per run.
 [[nodiscard]] uint32_t BufferOutOfBoundsCombination(const ShaderBufferResource& descriptor);
+// KYTY_BUFFER_RANGE_FIXES (descriptors.cpp).
+[[nodiscard]] bool BufferRangeFixesEnabled();
 // The final sampler dwords of a program's sampler binding (depth-compare bits cleared unless the
 // shader compares, point filtering forced where the shader needs it): the SamplerCache key.
 [[nodiscard]] ShaderSamplerResource

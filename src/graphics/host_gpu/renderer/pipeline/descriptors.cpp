@@ -292,7 +292,8 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	return result;
 }
 
-bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
+// Reserved and unsupported T# fields must be zero; perf_mod only scales sampler state.
+static bool IsCanonicalTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
 	constexpr uint32_t field1_reserved_mask = 0x200fff00u;
 	constexpr uint32_t field2_reserved_mask = 0xf0003000u;
 	const uint32_t     field3_expected = descriptor.DstSelXYZW() |
@@ -303,17 +304,25 @@ bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bo
 	const uint32_t     field4_expected = descriptor.Depth() | (descriptor.BaseArray5() << 16u);
 	const uint32_t     field5_expected = (static_cast<uint32_t>(descriptor.PerfMod5()) << 20u) |
 	                                     (static_cast<uint32_t>(descriptor.MaxMip()) << 4u);
-	const bool         common          = (descriptor.fields[1] & field1_reserved_mask) == 0 &&
-	                                     (descriptor.fields[2] & field2_reserved_mask) == 0 &&
-	                                     descriptor.fields[3] == field3_expected;
-	if (r128) {
-		return common && descriptor.fields[4] == 0 && descriptor.fields[5] == 0 &&
-		       descriptor.fields[6] == 0 && descriptor.fields[7] == 0;
+	if ((descriptor.fields[1] & field1_reserved_mask) != 0 ||
+	    (descriptor.fields[2] & field2_reserved_mask) != 0 || descriptor.fields[3] != field3_expected) {
+		return false;
 	}
-	const bool full = common && descriptor.fields[4] == field4_expected &&
-	                  descriptor.fields[5] == field5_expected;
-	if (!full ||
-	    (descriptor.MsaaDepth() && !IsMultisampledTexture(descriptor.Type()))) {
+	if (r128) {
+		return descriptor.fields[4] == 0 && descriptor.fields[5] == 0 && descriptor.fields[6] == 0 &&
+		       descriptor.fields[7] == 0;
+	}
+	return descriptor.fields[4] == field4_expected && descriptor.fields[5] == field5_expected;
+}
+
+bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
+	if (!IsCanonicalTextureEncoding(descriptor, r128)) {
+		return false;
+	}
+	if (r128) {
+		return true;
+	}
+	if (descriptor.MsaaDepth() && !IsMultisampledTexture(descriptor.Type())) {
 		return false;
 	}
 	const auto metadata_control = descriptor.fields[6] & 0x00ffffffu;
@@ -468,34 +477,10 @@ static bool IsSupportedStorageTextureDescriptor(const ShaderRecompiler::IR::Imag
 	const bool supported_swizzle =
 	    IsValidImageSwizzle(swizzle) &&
 	    (swizzle == DstSel(4, 5, 6, 7) || !resource.read || resource.atomic);
-	return (is_1d || is_1d_array || is_2d || is_2d_array || is_3d) && supported_tile &&
-	       descriptor.BaseLevel() <= descriptor.LastLevel() &&
+	return (is_1d || is_1d_array || is_2d || is_2d_array || is_3d) &&
+	       supported_tile && descriptor.BaseLevel() <= descriptor.LastLevel() &&
 	       descriptor.MinLod() == 0 && supported_swizzle && descriptor.BCSwizzle() == 0 &&
 	       !descriptor.MsaaDepth();
-}
-
-static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageResource& resource,
-                                              const ShaderTextureResource& descriptor) {
-	constexpr uint32_t field1_reserved_mask = 0x200fff00u;
-	constexpr uint32_t field2_reserved_mask = 0xf0003000u;
-	constexpr uint32_t field5_expected      = 0x00700000u;
-	constexpr uint32_t field5_max_mip_mask  = 0x000000f0u;
-	const uint32_t     expected_field3 = descriptor.DstSelXYZW() |
-	                                     (static_cast<uint32_t>(descriptor.BaseLevel()) << 12u) |
-	                                     (static_cast<uint32_t>(descriptor.LastLevel()) << 16u) |
-	                                     (static_cast<uint32_t>(descriptor.TileMode()) << 20u) |
-	                                     (static_cast<uint32_t>(descriptor.Type()) << 28u);
-	const uint32_t     expected_field4 =
-	    descriptor.Depth() | (static_cast<uint32_t>(descriptor.BaseArray5()) << 16u);
-	const bool common = (descriptor.fields[1] & field1_reserved_mask) == 0 &&
-	                    (descriptor.fields[2] & field2_reserved_mask) == 0 &&
-	                    descriptor.fields[3] == expected_field3;
-	if (resource.r128) {
-		return common && descriptor.fields[4] == 0 && descriptor.fields[5] == 0 &&
-		       descriptor.fields[6] == 0 && descriptor.fields[7] == 0;
-	}
-	return common && descriptor.fields[4] == expected_field4 &&
-	       (descriptor.fields[5] & ~field5_max_mip_mask) == field5_expected;
 }
 
 bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
@@ -503,7 +488,7 @@ bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	const auto format        = descriptor.Format();
 	const bool resource_ok   = IsSupportedStorageImageResource(resource);
 	const bool descriptor_ok = IsSupportedStorageTextureDescriptor(resource, descriptor);
-	const bool encoding_ok   = IsSupportedStorageTextureEncoding(resource, descriptor);
+	const bool encoding_ok   = IsCanonicalTextureEncoding(descriptor, resource.r128);
 	const bool uint_resource    = resource.numeric_class == Prospero::TextureNumericClass::Uint;
 	// Signed 32-bit atomics through a uint view (upstream aec8c8875).
 	const bool raw_sint_storage = format == Prospero::BufferFormat::k32SInt && uint_resource &&
@@ -682,7 +667,7 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 	}
 	view.usage = storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlagBits::eSampled;
 	view.mapping =
-	    storage || surface_format.conversion_format != Prospero::BufferFormat::kInvalid
+	    storage || resource.conversion_format != Prospero::BufferFormat::kInvalid
 	        ? vk::ComponentMapping {}
 	        : TextureGetComponentMapping(descriptor.DstSelXYZW(), surface_format.host_to_storage);
 	switch (resource.dimension) {
@@ -1805,6 +1790,32 @@ uint32_t BufferOutOfBoundsCombination(const ShaderBufferResource& descriptor) {
 	       (descriptor.SwizzleEnabled() ? 8u : 0u) | (descriptor.AddTid() ? 16u : 0u);
 }
 
+// KYTY_BUFFER_RANGE_FIXES=1 (default off): upstream buffer-range fixes for other games, each
+// logged once when it changes a binding:
+//  - fde0b98e6: a zero-stride V# with OOB_SELECT=2 tests only NUM_RECORDS != 0, so a non-scalar
+//    fetch keeps the shader's whole payload (max_byte_extent) when NUM_RECORDS is smaller;
+//  - cd4eab9d6: a written unbounded V# (NUM_RECORDS = ~0) is clamped to the storage-buffer limit
+//    as reads are (PPSA15246);
+//  - e5f0ee7fc: a finite V# below 1 GiB keeps its size across sparse PRT holes instead of being
+//    cut at the first unmapped page.
+// The draw-prep binding plan abstains from such bindings, so the serial path decides them.
+bool BufferRangeFixesEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_BUFFER_RANGE_FIXES");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
+static void NoteBufferRangeFix(const char* what, uint64_t address, uint64_t before, uint64_t after) {
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+		std::printf("KYTY_BUFFER_RANGE_FIXES: %s at 0x%016" PRIx64 ": 0x%" PRIx64 " -> 0x%" PRIx64 " bytes\n",
+		            what, address, before, after);
+		std::fflush(stdout);
+	}
+}
+
 static void NoteBufferOutOfBoundsMode(const ShaderBufferResource& descriptor, uint64_t address) {
 	auto&      seen        = g_buffer_out_of_bounds_seen;
 	const auto combination = BufferOutOfBoundsCombination(descriptor);
@@ -1866,15 +1877,29 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 		if (!use_plan || verify) {
 			auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]);
 			const auto serial_address = descriptor.Base48();
-			const auto requested_size = descriptor.GetSize();
+			auto       requested_size = descriptor.GetSize();
 			if (!use_plan) {
 				NoteBufferOutOfBoundsMode(descriptor, serial_address);
+			}
+			const bool range_fixes = BufferRangeFixesEnabled();
+			if (range_fixes && requested_size != 0 && descriptor.Stride() == 0 &&
+			    descriptor.OutOfBounds() == 2 && !program.info.buffers[i].scalar &&
+			    program.info.buffers[i].max_byte_extent > requested_size) {
+				NoteBufferRangeFix("zero-stride payload", serial_address, requested_size,
+				                   program.info.buffers[i].max_byte_extent);
+				requested_size = program.info.buffers[i].max_byte_extent;
 			}
 			uint64_t serial_size = 0;
 			uint64_t serial_base = 0;
 			if (serial_address != 0 && requested_size != 0) {
 				serial_base = serial_address;
 				serial_size = Libs::LibKernel::Memory::ClampRangeSizeQuiet(serial_address, requested_size);
+				if (range_fixes && serial_size != 0 && serial_size != requested_size &&
+				    requested_size < (uint64_t {1} << 30u) && descriptor.NumRecords() != UINT32_MAX) {
+					NoteBufferRangeFix("finite range across sparse holes", serial_address, serial_size,
+					                   requested_size);
+					serial_size = requested_size;
+				}
 				if (serial_size == 0) {
 					// An unmapped V# (typically left over from a skipped shader's output): bind
 					// no buffer instead of ending the emulator.
@@ -1901,9 +1926,13 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 			prepared.buffer_sources.push_back({});
 			continue;
 		}
-		if (size > unbounded_read_limit && !program.info.buffers[i].written &&
+		if (size > unbounded_read_limit &&
+		    (!program.info.buffers[i].written || BufferRangeFixesEnabled()) &&
 		    DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]).NumRecords() ==
 		        UINT32_MAX) {
+			if (program.info.buffers[i].written) {
+				NoteBufferRangeFix("written unbounded V# clamp", address, size, unbounded_read_limit);
+			}
 			// Upstream #1066 (e5dcfdb87): a read through an unbounded V# (NUM_RECORDS = ~0) binds
 			// at most 256 MiB, within the storage-buffer range limit. Only sizes past the limit
 			// decode the V# here, so the plan and serial ranges above stay as they are.

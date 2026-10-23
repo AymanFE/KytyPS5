@@ -458,6 +458,12 @@ void Replay(const Header& header, Exec& exec, ReplayState& state, MismatchHandle
 			exec.dispatch(p.x, p.y, p.z);
 			break;
 		}
+		case Op::DispatchBase: {
+			const auto& p = reader.Get<DispatchBasePacket>();
+			check(VerifyHash::Value(op, p.base_x, p.base_y, p.base_z, p.x, p.y, p.z));
+			exec.dispatchBase(p.base_x, p.base_y, p.base_z, p.x, p.y, p.z);
+			break;
+		}
 		case Op::DispatchIndirect: {
 			const auto& p           = reader.Get<DispatchIndirectPacket>();
 			uint64_t    buffer_bits = 0;

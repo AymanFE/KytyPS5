@@ -224,6 +224,7 @@ const char* OpName(Op op) noexcept {
 	    "DrawIndexedIndirectCount",
 	    "Dispatch",
 	    "DispatchIndirect",
+	    "DispatchBase",
 	    "ResetQueryPool",
 	    "BeginQuery",
 	    "EndQuery",
@@ -1331,6 +1332,15 @@ void Encoder::dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) {
 	w.Put(DispatchIndirectPacket {buffer, offset});
 	Close(w, m_options.verify ? VerifyHash::Value(Op::DispatchIndirect, HandleBits(buffer), offset)
 	                          : 0);
+}
+
+void Encoder::dispatchBase(uint32_t base_x, uint32_t base_y, uint32_t base_z, uint32_t x,
+                           uint32_t y, uint32_t z) {
+	auto w = Open(Op::DispatchBase, Sz<DispatchBasePacket>(), false);
+	w.Put(DispatchBasePacket {base_x, base_y, base_z, x, y, z});
+	Close(w, m_options.verify
+	             ? VerifyHash::Value(Op::DispatchBase, base_x, base_y, base_z, x, y, z)
+	             : 0);
 }
 
 void Encoder::resetQueryPool(vk::QueryPool pool, uint32_t first, uint32_t count) {

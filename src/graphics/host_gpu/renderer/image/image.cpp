@@ -83,15 +83,17 @@ bool CopyViaBufferBatchEnabled() {
 	}
 }
 
-[[nodiscard]] vk::ImageCreateFlags ImageCreateFlags(const GraphicContext& graphics,
-                                                   const ImageInfo& info) {
+[[nodiscard]] vk::ImageCreateFlags
+ImageCreateFlags(const GraphicContext& graphics, const ImageInfo& info, vk::ImageUsageFlags usage) {
 	vk::ImageCreateFlags flags {};
 	if (DepthAspectTransferFormat(info.pixel_format) == vk::Format::eUndefined) {
 		flags |= vk::ImageCreateFlagBits::eMutableFormat;
-		flags |= vk::ImageCreateFlagBits::eExtendedUsage;
 		if (info.IsBlock() && graphics.supports_block_texel_view) {
 			flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
 		}
+	}
+	if (usage & vk::ImageUsageFlagBits::eStorage) {
+		flags |= vk::ImageCreateFlagBits::eExtendedUsage;
 	}
 	if (info.IsVolume()) {
 		flags |= vk::ImageCreateFlagBits::e2DArrayCompatible;
@@ -154,7 +156,7 @@ bool CopyViaBufferBatchEnabled() {
 			vk::ImageFormatProperties properties {};
 			if (graphics.GetImageFormatProperties(info.pixel_format, HostImageType(info.type),
 			                                      vk::ImageTiling::eOptimal, storage,
-			                                      ImageCreateFlags(graphics, info),
+			                                      ImageCreateFlags(graphics, info, storage),
 			                                      &properties) == vk::Result::eSuccess) {
 				usage = storage;
 			}
@@ -577,8 +579,12 @@ void Image::CopyImageRegions(Image& source) {
 	std::vector<vk::ImageCopy> copies;
 	copies.reserve(levels);
 	for (uint32_t level = 0; level < levels; level++) {
-		const auto width  = std::max(source.backing.extent.width >> level, 1u);
-		const auto height = std::max(source.backing.extent.height >> level, 1u);
+		// Overlapping cache images can differ in size; copying the source extent into a smaller
+		// destination writes out of bounds and loses the device.
+		const auto width  = std::min(std::max(source.backing.extent.width >> level, 1u),
+		                             std::max(backing.extent.width >> level, 1u));
+		const auto height = std::min(std::max(source.backing.extent.height >> level, 1u),
+		                             std::max(backing.extent.height >> level, 1u));
 		const auto depth  = std::max(base_depth >> level, 1u);
 		const auto [source_layers, destination_layers] = SanitizeCopyLayers(source, *this, depth);
 		vk::ImageCopy copy {};
@@ -979,7 +985,8 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	}
 
 	vk::ImageCreateInfo create {};
-	create.flags         = ImageCreateFlags(graphics, info);
+	create.usage         = ImageUsageFlags(graphics, info);
+	create.flags         = ImageCreateFlags(graphics, info, create.usage);
 	create.imageType     = HostImageType(info.type);
 	create.extent        = info.extent;
 	create.mipLevels     = info.resources.levels;
@@ -987,7 +994,6 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.format        = info.pixel_format;
 	create.tiling        = vk::ImageTiling::eOptimal;
 	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.usage         = ImageUsageFlags(graphics, info);
 	create.samples       = vulkan_sample_count(info.samples);
 
 	const auto accepts = [&](vk::ImageUsageFlags usage, vk::ImageCreateFlags flags) {

@@ -132,6 +132,7 @@ static void PrintUsage() {
 	::printf("  --controller-color <#RRGGBB>        Override the controller lightbar color.\n");
 	::printf("  --controller-volume <0-100>         DualSense speaker volume. Default: 50.\n");
 	::printf("  --controller-vibration <0-100>      DualSense vibration intensity. Default: 100.\n");
+	::printf("  --keyboard-player <0-4>             Keyboard player; 0 shares player 1 with the gamepad. Default: 0.\n");
 	::printf("  --audio-master-volume <0-200>       Volume of everything on the main output. Default: 100.\n");
 	::printf("  --audio-main-volume <0-200>         Game sound (main ports). Default: 100.\n");
 	::printf("  --audio-music-volume <0-200>        Music on BGM ports. Default: 100.\n");
@@ -180,9 +181,12 @@ static void PrintUsage() {
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
 	::printf(
+	    "  --readback-tiled-images <true|false>  Read back small writable tiled images on submit.\n");
+	::printf(
 	    "  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. Default: false.\n");
 	::printf(
 	    "  --trophy-notifications <true|false>   Show trophy unlock toasts and play their sound.\n");
+	::printf("  --perf-overlay                       Show the performance panel (F2 or Cmd+P).\n");
 	::printf(
 	    "  --trophy-duration <seconds>          Trophy toast duration, 5-10. Default: 6.\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
@@ -357,6 +361,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
+		if (arg == "--perf-overlay") {
+			options.config.perf_overlay_enabled = true;
+			continue;
+		}
+
 		if (arg == "--amd-cpu" || arg == "--no-amd-cpu") {
 			amd_cpu        = arg == "--amd-cpu" ? AmdCpuChoice::On : AmdCpuChoice::Off;
 			amd_cpu_source = arg;
@@ -496,6 +505,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid controller vibration intensity: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--keyboard-player") {
+			if (!ParseUint32(value, options.config.keyboard_player) ||
+			    options.config.keyboard_player > static_cast<uint32_t>(Config::MAX_PLAYERS)) {
+				::printf("invalid keyboard player: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--audio-master-volume" || arg == "--audio-main-volume" ||
 		           arg == "--audio-music-volume" || arg == "--audio-pad-speaker-volume" ||
 		           arg == "--audio-objects-volume") {
@@ -611,6 +626,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--readback-linear-images") {
 			if (!ParseBool(value, options.config.readback_linear_images)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--readback-tiled-images") {
+			if (!ParseBool(value, options.config.readback_tiled_images)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

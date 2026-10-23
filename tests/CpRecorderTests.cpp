@@ -253,6 +253,9 @@ struct LogExecutor {
 	void dispatch(uint32_t x, uint32_t y, uint32_t z) {
 		Push(Op::Dispatch, VerifyHash::Value(Op::Dispatch, x, y, z));
 	}
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) {
+		Push(Op::DispatchBase, VerifyHash::Value(Op::DispatchBase, bx, by, bz, x, y, z));
+	}
 	void dispatchIndirect(vk::Buffer b, vk::DeviceSize o) {
 		Push(Op::DispatchIndirect, VerifyHash::Value(Op::DispatchIndirect, Bits(b), o));
 	}
@@ -751,6 +754,12 @@ public:
 				if (op == Op::DrawIndexedIndirectCount) e.drawIndexedIndirectCount(b, o, cb, co, m, s);
 				expected.push_back({op, VerifyHash::Value(op, LogExecutor::Bits(b), o,
 				                                          LogExecutor::Bits(cb), co, m, s)});
+				break;
+			}
+			case Op::DispatchBase: {
+				const uint32_t bx = U32(), by = U32(), bz = U32(), x = U32(), y = U32(), z = U32();
+				e.dispatchBase(bx, by, bz, x, y, z);
+				expected.push_back({op, VerifyHash::Value(op, bx, by, bz, x, y, z)});
 				break;
 			}
 			case Op::DispatchIndirect: {

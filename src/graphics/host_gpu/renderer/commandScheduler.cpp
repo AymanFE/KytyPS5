@@ -5,6 +5,7 @@
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
@@ -612,7 +613,7 @@ void CommandScheduler::CheckActive() const {
 }
 
 CommandBuffer& CommandScheduler::Current() {
-	CheckActive();
+	EXIT_IF(m_command.IsInvalid());
 	return m_command;
 }
 
@@ -838,6 +839,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 			result = graphics.queue.submit(1, &submit_info, nullptr);
 		}
 	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
 	if (result == vk::Result::eErrorDeviceLost) {
 		DumpDeviceLossDiagnostics(graphics, tick);

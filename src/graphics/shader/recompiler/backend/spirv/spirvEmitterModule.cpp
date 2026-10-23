@@ -248,7 +248,12 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 }
 
 void DefineDescriptors(EmitterState& state) {
-	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh) {
+	const bool user_clip_planes = state.program.stage != ShaderType::Pixel &&
+	                              state.program.stage != ShaderType::Compute &&
+	                              state.input_info.vertex != nullptr &&
+	                              state.input_info.vertex->user_clip_planes != 0;
+	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
+	    user_clip_planes) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
 		    TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);
@@ -709,6 +714,21 @@ void DefineOutputs(EmitterState& state) {
 			clip_distance_count = std::max(clip_distance_count, output.index + 1);
 		} else if (output.kind == IR::StageOutputKind::CullDistance) {
 			cull_distance_count = std::max(cull_distance_count, output.index + 1);
+		}
+	}
+	const bool has_position = std::ranges::any_of(state.outputs, [](const OutputBinding& output) {
+		return output.kind == IR::StageOutputKind::Position;
+	});
+	if (has_position && state.program.stage != ShaderType::Pixel &&
+	    state.input_info.vertex != nullptr && state.input_info.vertex->user_clip_planes != 0) {
+		// Upstream feed075a9: PipelineCache rejects UCP_ENA with shader clip or cull distances.
+		EXIT_IF(clip_distance_count + cull_distance_count != 0);
+		state.user_clip_planes = state.input_info.vertex->user_clip_planes;
+		for (uint32_t plane = 0; plane < 32u; plane++) {
+			if ((state.user_clip_planes & (1u << plane)) != 0) {
+				state.outputs.push_back(
+				    {{IR::StageOutputKind::ClipDistance, clip_distance_count++, 0, "gl_ClipDistance"}});
+			}
 		}
 	}
 	if (state.program.stage == ShaderType::Mesh) {

@@ -608,6 +608,7 @@ private:
 	// DccDecisionEffects (GPU thread).
 	uint64_t         m_dcc_decision_effects = 0;
 	bool             m_readback_linear_images = false;
+	bool             m_readback_tiled_images  = false;
 	// Texture streaming (see TextureCache constructor for the environment switches).
 	bool             m_partial_upload      = true;
 	bool             m_partial_bands       = true;

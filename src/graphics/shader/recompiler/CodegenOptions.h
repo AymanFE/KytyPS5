@@ -106,6 +106,12 @@ struct CodegenOptions {
 	// zero min/max(-0, +0) returns unspecified and may treat denormals differently from the
 	// guest's compare (see EmitFastMinMaxF32), so this stays opt-in.
 	bool native_float_min_max = false;
+	// KYTY_DCACHE_INV=1 (default off; upstream 22ef16a04): BUFFER_GL0_INV/GL1_INV emit a device
+	// acquire barrier and make the program's storage buffers coherent (slower memory access).
+	bool dcache_invalidate = false;
+	// KYTY_READFIRSTLANE_EXEC0=1 (default off; upstream 919fac13d): V_READFIRSTLANE with EXEC
+	// zero reads lane 0 (FindILsb + select) instead of BallotFindLSB's undefined lane.
+	bool readfirstlane_exec_zero = false;
 	// KYTY_UNIFORM_BUFFERS=1 (EmK530/KytyPS5 407de5105): bind constant-only buffers as uniform
 	// buffers instead of storage buffers (IR::UniformBufferResources). Off by default: neutral in
 	// Miles Morales on an RTX 3090 (GPU busy within noise), and on NVIDIA's 16-byte uniform

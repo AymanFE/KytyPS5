@@ -85,6 +85,7 @@ enum class Op : uint16_t {
 	DrawIndexedIndirectCount,
 	Dispatch,
 	DispatchIndirect,
+	DispatchBase,
 	ResetQueryPool,
 	BeginQuery,
 	EndQuery,
@@ -316,6 +317,14 @@ struct Groups3Packet {
 	uint32_t x = 0;
 	uint32_t y = 0;
 	uint32_t z = 0;
+};
+struct DispatchBasePacket {
+	uint32_t base_x = 0;
+	uint32_t base_y = 0;
+	uint32_t base_z = 0;
+	uint32_t x      = 0;
+	uint32_t y      = 0;
+	uint32_t z      = 0;
 };
 struct IndirectPacket {
 	vk::Buffer buffer     = nullptr;
@@ -631,7 +640,8 @@ public:
 			case Op::DrawIndirectCount:
 			case Op::DrawIndexedIndirectCount:
 			case Op::Dispatch:
-			case Op::DispatchIndirect: return true;
+			case Op::DispatchIndirect:
+			case Op::DispatchBase: return true;
 			default: return false;
 		}
 	}
@@ -728,6 +738,8 @@ public:
 	                              vk::DeviceSize count_offset, uint32_t max_count, uint32_t stride);
 	void dispatch(uint32_t x, uint32_t y, uint32_t z);
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset);
+	void dispatchBase(uint32_t base_x, uint32_t base_y, uint32_t base_z, uint32_t x, uint32_t y,
+	                  uint32_t z);
 	void resetQueryPool(vk::QueryPool pool, uint32_t first, uint32_t count);
 	void beginQuery(vk::QueryPool pool, uint32_t query, vk::QueryControlFlags flags);
 	void endQuery(vk::QueryPool pool, uint32_t query);

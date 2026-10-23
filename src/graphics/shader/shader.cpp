@@ -1164,6 +1164,7 @@ static void ShaderGetStaticInputInfoPS(
 
 	ps_info = {};
 	ps_info.scratch_size_dwords = data.scratch_size_dwords;
+	ps_info.lds_size_dwords     = static_cast<uint32_t>(regs.ps_regs.rsrc2.extra_lds_size) * 128u;
 
 	// SPI_PS_IN_CONTROL: NUM_INTERP occupies bits 5:0 and PS_W32_EN is bit 15.
 	ps_info.input_num            = sh.ps_in_control & 0x3fu;
@@ -1214,10 +1215,11 @@ static void ShaderGetStaticInputInfoPS(
 	ps_info.ps_pixel_kill_enable         = sh.db_shader_control.shader_kill_enable;
 	ps_info.ps_depth_export_enable       = sh.db_shader_control.shader_z_export_enable;
 	ps_info.ps_sample_mask_export_enable = sh.db_shader_control.shader_mask_export_enable;
+	// Alpha-to-mask coverage must gate depth writes, so it rules out early fragment tests.
 	ps_info.ps_early_z =
 	    (sh.db_shader_control.shader_z_behavior == 1 && !sh.db_shader_control.shader_kill_enable &&
 	     !sh.db_shader_control.shader_z_export_enable &&
-	     !sh.db_shader_control.shader_mask_export_enable);
+	     !sh.db_shader_control.shader_mask_export_enable && !sh.AlphaToMask());
 	ps_info.ps_execute_on_noop = sh.db_shader_control.shader_execute_on_noop;
 
 	for (uint32_t i = 0; i < ps_info.input_num; i++) {
@@ -1311,6 +1313,8 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		}
 		info.wave_size           = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
 		info.start_instance_sgpr = start_instance_sgpr;
+		// Upstream fa8216c4d: per-invocation LDS emulation is sized by the GS stage's LDS_SIZE.
+		info.lds_size_dwords = static_cast<uint32_t>(regs.gs_regs.rsrc2.lds_size) * 128u;
 		return params;
 	}
 	// NGG user SGPRs start at s8; a separately compiled GS back half also receives
@@ -1363,11 +1367,22 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	                                       : group.primitive_group_size * (sh.m_vgtGsMaxVertOut - 2u);
 	mesh.primitives_per_group = std::min({static_cast<uint32_t>(group.primitive_group_size),
 	                                      mesh.InputPrimitiveCount(group.vertex_group_size),
-	                                      native_ngg ? mesh.max_primitives :
+	                                      native_ngg ? mesh.InputPrimitiveCount(mesh.max_vertices) :
 	                                          mesh.max_vertices / sh.m_vgtGsMaxVertOut});
 	EXIT_IF(mesh.primitives_per_group == 0u);
 	mesh.vertices_per_group = mesh.InputVertexCount(mesh.primitives_per_group);
-	const auto threads  = native_ngg ? mesh.vertices_per_group : mesh.max_vertices;
+	auto threads = native_ngg ? mesh.vertices_per_group : mesh.max_vertices;
+	// KYTY_NGG_PRIM_AMP=1 (default off; upstream ae2555832): the primitive outputs are sized from
+	// GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR (primitives per input primitive), and the workgroup is
+	// large enough to export each of them.
+	static const bool prim_amp = [] {
+		const char* value = std::getenv("KYTY_NGG_PRIM_AMP");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (prim_amp && (sh.m_geNggSubgrpCntl & 0x1ffu) != 0u) {
+		mesh.max_primitives = mesh.primitives_per_group * (sh.m_geNggSubgrpCntl & 0x1ffu);
+		threads             = std::max(threads, mesh.max_primitives);
+	}
 	mesh.threads_num[0] = ((threads + mesh.wave_size - 1u) / mesh.wave_size) * mesh.wave_size;
 	mesh.threads_num[1] = mesh.threads_num[2] = 1u;
 	return params;
@@ -1424,7 +1439,21 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	};
 	EXIT_IF(tess.input_control_points == 0 || tess.input_control_points > 32 ||
 	        tess.output_control_points == 0 || tess.output_control_points > 32);
-	ShaderRecompiler::AnalyzeTessellationPrograms(params[0].code, params[1].code, tess);
+	// Upstream c71589124: reflection decodes both programs, so it runs once per LS/HS pair and VGT
+	// configuration (the key also covers the VGT fields cached in tess).
+	const uint64_t layout_key[] = {RegisteredOrDeclaredShaderHash(regs.ls_regs.data_addr, local),
+	                              RegisteredOrDeclaredShaderHash(regs.hs_regs.data_addr, control),
+	                              uint64_t {sh.m_vgtLsHsConfig & 0xfff00u} << 32u | sh.m_vgtTfParam};
+	{
+		static std::unordered_map<uint64_t, ShaderTessellationInputInfo> layouts;
+		static std::mutex                                                layouts_mutex;
+		std::scoped_lock lock(layouts_mutex);
+		auto [entry, inserted] = layouts.try_emplace(XXH3_64bits(layout_key, sizeof(layout_key)), tess);
+		if (inserted) {
+			ShaderRecompiler::AnalyzeTessellationPrograms(params[0].code, params[1].code, entry->second);
+		}
+		tess = entry->second;
+	}
 	for (auto& stage: input_info) {
 		stage.tess = tess;
 	}
@@ -1539,7 +1568,8 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info) {
 	     "\t ps_no_perspective    = %s\n"
 	     "\t ps_pixel_kill_enable = %s\n"
 	     "\t ps_early_z           = %s\n"
-	     "\t ps_execute_on_noop   = %s\n",
+	     "\t ps_execute_on_noop   = %s\n"
+	     "\t lds_size_dwords      = %u\n",
 	     info.input_num, info.ps_system_input_base, info.custom_interpolation_mask,
 	     info.ps_perspective_center_vgpr, info.ps_perspective_sample_vgpr,
 	     info.ps_perspective_centroid_vgpr, info.ps_pos_x ? "true" : "false",
@@ -1548,7 +1578,7 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info) {
 	     info.ps_front_face_all_bits ? "true" : "false", info.ps_ancillary ? "true" : "false",
 	     info.ps_sample_shading ? "true" : "false", info.ps_no_perspective ? "true" : "false",
 	     info.ps_pixel_kill_enable ? "true" : "false", info.ps_early_z ? "true" : "false",
-	     info.ps_execute_on_noop ? "true" : "false");
+	     info.ps_execute_on_noop ? "true" : "false", info.lds_size_dwords);
 
 	for (uint32_t i = 0; i < info.input_num; i++) {
 		LOGF("\t interpolator_settings[%u] = %u\n", i, info.interpolator_settings[i]);

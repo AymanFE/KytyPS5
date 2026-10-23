@@ -5,6 +5,7 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -104,6 +105,8 @@ struct EmitterState {
 	Builder                                          builder;
 	const IR::Program&                               program;
 	ShaderStageInputInfo                             input_info;
+	// PA_CL_UCP planes the last pre-rasterization stage writes as clip distances (upstream feed075a9).
+	uint32_t                                        user_clip_planes = 0;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;
 	uint32_t                                        u32_type = 0;
@@ -118,9 +121,8 @@ struct EmitterState {
 	std::array<uint32_t, 3>                          u32_vector_types {};
 	std::array<uint32_t, 3>                          i32_vector_types {};
 	std::array<uint32_t, 3>                          f32_vector_types {};
-	std::array<uint32_t, 6>                          tess_variables {};
+	std::array<uint32_t, IR::NumTessellationAttributes> tess_variables {};
 	uint32_t                                         tess_inner_variable = 0;
-	uint32_t                                         tess_patch_base     = 0;
 
 	const SpirvRequirements                          requirements;
 	uint32_t                                         lane_count              = 1;
@@ -406,6 +408,7 @@ uint32_t LoadSamplerDescriptor(EmitterState& state, uint32_t sampler);
 uint32_t MakeSampledImage(EmitterState& state, uint32_t resource, uint32_t sampler_id,
                           uint32_t mip = 0, uint32_t array_index = 0);
 
+// sample is 0 (no id) for single-sampled images.
 void EmitStorageImageWrite(EmitterState& state, uint32_t resource, uint32_t mip_lod, uint32_t coord,
                            uint32_t texel);
 
@@ -535,6 +538,7 @@ inline spv::MemorySemanticsMask LdsMemorySemantics(const EmitterState& state) {
 struct MemoryResourceAccess {
 	IR::ResourceKind      kind             = IR::ResourceKind::None;
 	uint32_t              object_pointer   = 0;
+	uint32_t              descriptor_index = 0;
 	uint32_t              length           = 0;
 	uint32_t              byte_offset      = 0;
 	uint32_t              element_bits     = 32;
@@ -696,6 +700,10 @@ auto EmitIndexSwitch(EmitterState& state, uint32_t index, uint32_t count,
 
 template <typename Fn>
 void EmitIfCondition(EmitterState& state, uint32_t condition, Fn&& fn) {
+	if (condition == ConstantBool(state, true)) {
+		fn();
+		return;
+	}
 	const auto then_label  = state.builder.AllocateId();
 	const auto merge_label = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
@@ -709,6 +717,7 @@ void EmitIfCondition(EmitterState& state, uint32_t condition, Fn&& fn) {
 template <typename Fn>
 uint32_t EmitValueOrDefaultIfCondition(EmitterState& state, uint32_t condition, uint32_t type,
                                        uint32_t default_value, Fn&& fn) {
+	if (condition == ConstantBool(state, true)) return fn();
 	const auto then_label  = state.builder.AllocateId();
 	const auto header     = state.current_label;
 	const auto merge_label = state.builder.AllocateId();

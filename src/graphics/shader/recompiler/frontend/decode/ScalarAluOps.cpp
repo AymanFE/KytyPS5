@@ -178,6 +178,7 @@ void DecodeSop1(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 
 	switch (inst.opcode) {
 		case Opcode::S_GETPC_B64:
+			inst.data_dwords = 2u;
 			inst.src_count = 0;
 			DecodeScalarDestination(sdst, pc, inst.dst);
 			return;
@@ -217,6 +218,8 @@ void DecodeSop2(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 
 	DecodeScalarDestination(sdst, pc, inst.dst);
 	DecodeBinarySources(pc, code, word_index, inst, ssrc0, ssrc1);
+	if (opcode == 0x0bu || (opcode >= 0x0fu && opcode <= 0x25u && (opcode & 1u)) || opcode == 0x29u)
+		inst.data_dwords = 2u;
 }
 
 void DecodeSopk(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,

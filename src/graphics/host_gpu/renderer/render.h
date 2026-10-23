@@ -76,6 +76,9 @@ enum class DrawOffsetSource : uint8_t {
 	IndirectArgs,
 };
 
+// KYTY_ORDERED_APPEND (renderCompute.cpp).
+[[nodiscard]] bool OrderedAppendSplitEnabled();
+
 struct DrawIndexArgs {
 	uint32_t         index_count                = 0;
 	const void*      index_addr                 = nullptr;
@@ -919,6 +922,14 @@ public:
 			m_owner->m_encoder->dispatch(x, y, z);
 		} else {
 			m_owner->m_buffer.dispatch(x, y, z);
+		}
+	}
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y,
+	                  uint32_t z) const {
+		if (m_owner->Encoding()) {
+			m_owner->m_encoder->dispatchBase(bx, by, bz, x, y, z);
+		} else {
+			m_owner->m_buffer.dispatchBase(bx, by, bz, x, y, z);
 		}
 	}
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {

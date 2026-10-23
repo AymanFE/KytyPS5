@@ -29,6 +29,10 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <atomic>
+#include <cinttypes>
+#include <iterator>
+#include <variant>
 #include <vector>
 
 #ifdef min
@@ -251,6 +255,14 @@ static int GetHostPathStat(const std::filesystem::path& host_path, LibKernel::Fi
 	return OK;
 }
 
+// Mounts can appear after a failed lookup (e.g. additional content), so forget negative results.
+void InvalidateFailedResolves() {
+	std::scoped_lock lock(g_mutex);
+	for (auto it = g_resolved_paths.begin(); it != g_resolved_paths.end();) {
+		it = it->second.result != OK ? g_resolved_paths.erase(it) : std::next(it);
+	}
+}
+
 static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) {
 	if (guest_path == nullptr || guest_path[0] == '\0') {
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -303,6 +315,10 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 				log_missing = true;
 			}
+		}
+		if (!log_missing && info.result == OK && path.starts_with("/addcont")) {
+			LOGF("\tAPR resolve: %s -> %s (%" PRIu64 " bytes)\n", guest_path,
+			     Common::PathToString(info.host_path).c_str(), info.file_size);
 		}
 		if (log_missing) {
 			LOGF("\tAPR resolve missing path: %s -> %s\n", guest_path, Common::PathToString(info.host_path).c_str());

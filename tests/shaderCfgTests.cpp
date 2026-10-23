@@ -10072,7 +10072,8 @@ void TestNewShaderRecompilerBufferLoadsGuardedByExec() {
         "buffer load SPIR-V lacks storage buffer bounds branch");
   Check(element_access != std::string::npos,
         "buffer load SPIR-V lacks storage element access");
-  Check(exec_branch < array_length,
+  // A provably full EXEC emits no guard (upstream 0f7d11254): the first branch is the bounds one.
+  Check(exec_branch < array_length || exec_branch == bounds_branch,
         "buffer load bounds check was emitted outside EXEC guard");
   Check(bounds_branch < element_access,
         "buffer load storage element pointer was formed before bounds guard");

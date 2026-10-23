@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/crashContext.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/guestProbe.h"
@@ -272,6 +273,7 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 // Returns 0 (rax and xmm0, see the thunk). Reported per import: its first call, then its call
 // count at powers of ten from 1,000 (UnresolvedImportLog).
 static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_address) {
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
 	auto*      record = reinterpret_cast<StubbedImportRecord*>(record_address);
 	const auto call   = record->calls.fetch_add(1, std::memory_order_relaxed) + 1;
 	if (UnresolvedImportLog::ReportFirst(call)) {
@@ -786,6 +788,9 @@ static bool TryHandleGuestAccessFault(const Common::HostException::ExceptionInfo
 #endif
 	const GuestLoad::FaultScope guest_load(guest_code ? info->native_context : nullptr);
 	const bool handled = Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
+	if (handled) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
+	}
 	if (HangTrace::Enabled()) {
 		HangTrace::ClearFaultContext();
 	}
@@ -855,6 +860,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::EmulatedInstructions);
 		return true;
 	}
 

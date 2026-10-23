@@ -326,6 +326,7 @@ VALUE_OPCODE(SharedAtomicUMin32, U32, U32, U32, U1)
 VALUE_OPCODE(SharedAtomicSMax32, U32, U32, U32, U1)
 VALUE_OPCODE(SharedAtomicUMax32, U32, U32, U32, U1)
 VALUE_OPCODE(SharedAtomicUMax64, U64, U32, U64, U1)
+VALUE_OPCODE(SharedAtomicCmpSwap32, U32, U32, U32, U32, U1)
 VALUE_OPCODE(SharedAtomicCmpSwap64, U64, U32, U64, U64, U1)
 VALUE_OPCODE(SharedAtomicAnd32, U32, U32, U32, U1)
 VALUE_OPCODE(SharedAtomicOr32, U32, U32, U32, U1)
@@ -368,11 +369,14 @@ VALUE_OPCODE(GetAttribute, U32, U32, U32)
 // V_INTERP_P2_F32 before SSA: attribute, channel and the J operand. Constant propagation turns it
 // into GetAttribute with an InterpolationMode flag.
 VALUE_OPCODE(GetAttributeWithBary, U32, U32, U32, U32)
+// V_INTERP_P2_F16 (upstream d7c189664): attribute, channel and which f16 of the packed dword.
+VALUE_OPCODE(GetAttributeF16, F32, U32, U32, U32)
 VALUE_OPCODE(GetInterpolationParameter, U32, U32, U32, U32)
 VALUE_OPCODE(SetAttribute, Void, U32x4, U1)
 
 VALUE_OPCODE(ControlNop, Void)
 VALUE_OPCODE(StoreCompletion, Void)
+VALUE_OPCODE(DataCacheInvalidate, Void)
 VALUE_OPCODE(Barrier, Void)
 VALUE_OPCODE(SharedMemoryBarrier, Void)
 VALUE_OPCODE(Sendmsg, Void)

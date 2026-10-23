@@ -6,6 +6,7 @@
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
@@ -1282,6 +1283,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	std::vector<vk::BufferCopy> regions;
 	total_size = PackDownloadRegions(copies, static_cast<uint64_t>(g_readback_merge_gap.Get()), regions);
 	RecordReadbackRegions(copies, regions);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferDownloadBytes, total_size);
 
 	auto [mapped, offset] = m_download_buffer.Map(total_size, 64);
 	// A download larger than the staging ring gets a buffer of its own, released after the
@@ -1538,6 +1540,10 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	}
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
 	                     "BDA Page Table Buffer");
+	m_scheduler.BeginCommand();
+	for (auto* buffer: {&m_bda_pagetable_buffer, m_fault_manager.GetFaultBuffer()}) {
+		buffer->Fill(0, buffer->Size(), 0);
+	}
 	const auto null_id =
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
@@ -3483,6 +3489,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 		}
 		return host_data + (copy.srcOffset - host_base);
 	};
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferUploadBytes, total_size);
 
 	auto [mapped, base_offset] = m_staging_buffer.Map(total_size, 4);
 	if (mapped != nullptr) {
@@ -5040,6 +5047,7 @@ void BufferCache::RunGarbageCollector() {
 		} else {
 			m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
 			DeleteBuffer(id);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferEvictions);
 		}
 		return ++retire_count == limit;
 	});

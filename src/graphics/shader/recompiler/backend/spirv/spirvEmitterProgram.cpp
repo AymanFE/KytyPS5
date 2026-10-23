@@ -20,10 +20,8 @@ namespace {
 void EmitKillIfBoolFalse(EmitterState& state, uint32_t active) {
 	const auto kill_label  = state.builder.AllocateId();
 	const auto merge_label = state.builder.AllocateId();
-	const auto inactive    = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), inactive, active);
 	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
-	state.builder.AddFunction(spv::OpBranchConditional, inactive, kill_label, merge_label);
+	state.builder.AddFunction(spv::OpBranchConditional, active, merge_label, kill_label);
 	EmitLabel(state, kill_label);
 	state.builder.AddFunction(spv::OpKill);
 	EmitLabel(state, merge_label);
@@ -678,8 +676,13 @@ bool EmitIndexedSelect(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
-	if (ctx.half != 0 && (inst.GetOpcode() == IR::ValueOpcode::Ballot ||
-	                     inst.GetOpcode() == IR::ValueOpcode::ReadFirstLane)) {
+	if (ctx.half != 0 &&
+	    (inst.GetOpcode() == IR::ValueOpcode::Ballot ||
+	     inst.GetOpcode() == IR::ValueOpcode::ReadFirstLane ||
+	     // Upstream 8cc5f5364: SMEM loads (SGPR operands, no EXEC) are identical in both halves.
+	     inst.GetOpcode() == IR::ValueOpcode::ReadConstBuffer ||
+	     (inst.GetOpcode() == IR::ValueOpcode::LoadAddressU32 &&
+	      ctx.Memory(inst).kind == IR::ResourceKind::ScalarAddress))) {
 		// Both operations already combine both emulated halves into one whole-wave result.
 		ctx.Define(inst, ctx.other_half->Result(inst));
 		return;
@@ -779,6 +782,7 @@ void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& 
 			if (half == 0 || (inst.GetOpcode() != IR::ValueOpcode::Barrier &&
 			                  inst.GetOpcode() != IR::ValueOpcode::SharedMemoryBarrier &&
 			                  inst.GetOpcode() != IR::ValueOpcode::StoreCompletion &&
+			                  inst.GetOpcode() != IR::ValueOpcode::DataCacheInvalidate &&
 			                  inst.GetOpcode() != IR::ValueOpcode::MeshAllocate)) {
 				emit_instruction(lane, inst);
 			}
@@ -1066,6 +1070,34 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 		state.builder.AddFunction(spv::OpExtInst, TypeU32(state), result, GlslStd450(state),
 		                          GLSLstd450FindILsb, bits);
 		return result;
+	}
+	if (other_half == nullptr && !state.split_wave && GetCodegenOptions().readfirstlane_exec_zero) {
+		// KYTY_READFIRSTLANE_EXEC0 (upstream 919fac13d): an empty ballot (EXEC zero) gives lane 0,
+		// which V_READFIRSTLANE reads on hardware; BallotFindLSB is undefined for it.
+		const auto first = [&](uint32_t word) {
+			const auto bits = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), bits, ballot, word);
+			const auto lsb = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpExtInst, TypeU32(state), lsb, GlslStd450(state),
+			                          GLSLstd450FindILsb, bits);
+			return std::pair {bits, lsb};
+		};
+		const auto [low, low_first] = first(0);
+		const auto clamp_zero = [&](uint32_t value) {
+			const auto result = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpExtInst, TypeU32(state), result, GlslStd450(state),
+			                          GLSLstd450SMax, value, ConstantU32(state, 0));
+			return result;
+		};
+		if (state.program.wave_size == 32u) {
+			return clamp_zero(low_first);
+		}
+		const auto high_first = first(1).second;
+		const auto high_lane  = clamp_zero(EmitBinaryU32(state, spv::OpBitwiseOr, high_first,
+		                                                 ConstantU32(state, 32)));
+		return Select(state, TypeU32(state),
+		              Binary(state, spv::OpINotEqual, TypeBool(state), low, ConstantU32(state, 0)),
+		              low_first, high_lane);
 	}
 	if (other_half == nullptr && !state.split_wave) {
 		const auto result = state.builder.AllocateId();
