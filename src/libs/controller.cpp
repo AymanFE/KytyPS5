@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <string_view>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -555,8 +557,49 @@ void GameController::SetDevices(int active_id) {
 	m_state_effect       = {};
 }
 
+// KYTY_PAD_STATE_COALESCE=1 (default off): an input event that changes no button and no touch
+// (a stick or trigger step, a finger moving) updates the newest state while no read has taken it,
+// instead of adding a state. scePadRead returns the unread states oldest first; a moving stick
+// adds one per report, so more than 63 events between two reads (a frame hitch) pushed an unread
+// press, or a whole tap, out of the 64-state history. With it every press and release keeps a
+// state of its own and the newest state has the latest sticks. Unread states dropped are counted
+// and reported on stdout at most every 5 s, with the switch on or off.
+// Ported from chenxiao07/KytyPS5 167ed5886 (Stefano Scalfari).
+static bool PadStateCoalescing() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_STATE_COALESCE");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	return on;
+}
+
 void GameController::AddState() {
+	if (m_states_num != 0 && PadStateCoalescing()) {
+		const auto  newest = (m_first_state + m_states_num - 1) % STATES_MAX;
+		const auto& last   = m_states[newest];
+		if (!m_obtained[newest] && last.buttons == m_state.buttons &&
+		    last.touch[0].down == m_state.touch[0].down && last.touch[0].id == m_state.touch[0].id &&
+		    last.touch[1].down == m_state.touch[1].down && last.touch[1].id == m_state.touch[1].id) {
+			m_states[newest] = m_state;
+			return;
+		}
+	}
 	if (m_states_num >= STATES_MAX) {
+		if (!m_obtained[m_first_state]) {
+			static uint64_t dropped = 0, unreported = 0;
+			static auto     reported = std::chrono::steady_clock::time_point {};
+			dropped++;
+			unreported++;
+			const auto now = std::chrono::steady_clock::now();
+			if (now - reported >= std::chrono::seconds(5)) {
+				std::printf("Pad: %llu input states dropped unread (the 64-state history was full; "
+				            "%llu in all)\n",
+				            static_cast<unsigned long long>(unreported),
+				            static_cast<unsigned long long>(dropped));
+				unreported = 0;
+				reported   = now;
+			}
+		}
 		m_states_num  = STATES_MAX - 1;
 		m_first_state = (m_first_state + 1) % STATES_MAX;
 	}
