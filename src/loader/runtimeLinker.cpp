@@ -357,9 +357,7 @@ static KYTY_SYSV_ABI void RunEntry(uint64_t addr, EntryParams* params, atexit_fu
 		             "pushq %%r15\n\t"
 		             "movq %%gs:0x08, %%r14\n\t"
 		             "movq %%gs:0x10, %%r15\n\t"
-		             "xorq %%rcx, %%rcx\n\t"
-		             "movq %%rcx, %%gs:0x08\n\t"
-		             "movq %%rcx, %%gs:0x10\n\t"
+		             KYTY_GUEST_TEB_STACK_RANGE_ASM("%[teb_range]")
 		             "movq %%rsp, %%r12\n\t"
 		             "movq %%rbp, %%r13\n\t"
 		             "movq %[guest_rsp], %%rsp\n\t"
@@ -374,7 +372,8 @@ static KYTY_SYSV_ABI void RunEntry(uint64_t addr, EntryParams* params, atexit_fu
 		             "popq %%r13\n\t"
 		             "popq %%r12\n\t"
 		             : [guest_rsp] "+r"(guest_rsp_reg), [guest_rbp] "+r"(guest_rbp_reg)
-		             : [func] "r"(func_reg), "D"(params), "S"(atexit_func)
+		             : [func] "r"(func_reg), "D"(params), "S"(atexit_func),
+		               [teb_range] "m"(Common::HostException::g_guest_teb_stack_range)
 		             : "cc", "memory", "rax", "rcx", "rdx", "r10", "r11", "xmm0", "xmm1", "xmm2",
 		               "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
 		               "xmm12", "xmm13", "xmm14", "xmm15");
@@ -509,7 +508,15 @@ bool TestMainEntryUsesGuestStack() {
 	             : "=r"(restored_teb_stack_base), "=r"(restored_teb_stack_limit)
 	             :
 	             : "memory");
-	const bool teb_ok = state.teb_stack_base == 0 && state.teb_stack_limit == 0 &&
+	// Zeros, or with KYTY_GUEST_TEB_STACK_RANGE=1 and the host stack above the guest stacks'
+	// region, that region (hostException.h).
+	uintptr_t deallocation_stack = 0;
+	asm volatile("movq %%gs:0x1478, %0" : "=r"(deallocation_stack) : : "memory");
+	const bool teb_range = Common::HostException::g_guest_teb_stack_range != 0 &&
+	                       deallocation_stack >= Common::HostException::GuestStacksHigh;
+	const bool teb_ok =
+	    state.teb_stack_base == (teb_range ? Common::HostException::GuestStacksHigh : 0) &&
+	    state.teb_stack_limit == (teb_range ? Common::HostException::GuestStacksLow : 0) &&
 	                    restored_teb_stack_base == original_teb_stack_base &&
 	                    restored_teb_stack_limit == original_teb_stack_limit;
 #else
