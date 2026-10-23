@@ -1035,8 +1035,11 @@ void TextureCache::RegisterImage(ImageId id) {
 	if (!ImagePageTable::TryGetPageRange(image.live.address, image.live.size, pages)) {
 		EXIT("TextureCache: image registration is outside the guest address space\n");
 	}
+	// Registering an image that is already GPU-modified (EnsureResidency re-registers) makes its
+	// range GPU-owned: log it as such, so the sticky GPU-touched pages (gpuTouchedPages.h) cover it.
 	InvalidateCleanImageProofs(image.live.address, image.live.size,
-	                           Coherence::Source::ImageRegister);
+	                           image.IsGpuModified() ? Coherence::Source::ImageGpuModified
+	                                                 : Coherence::Source::ImageRegister);
 	NoteStructureChange(image);
 	ForEachPage(image.live.address, image.live.size, [this, id](uint64_t page) {
 		// Counted before the image enters the page's owner list, so a lock-free zero count means
