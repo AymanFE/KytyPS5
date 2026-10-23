@@ -4056,11 +4056,34 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		EXIT("TextureCache: stencil association requires a depth/stencil image\n");
 	}
 
+	// KYTY_STENCIL_TARGETS_APART=1 (default off): an image the GPU draws to at the stencil plane's
+	// range (a colour or depth target of a pool of targets reused while an area loads) is not taken
+	// as the association record; a record of its own is made beside it. Taken, the target turned
+	// into the depth image's from then on and the next draw to it ended the emulator ("color target
+	// requires rediscovery before final acquisition"; chenxiao07/KytyPS5 issue #94). Storage images
+	// stay eligible here (stencil writes through storage views resolve through the record). The
+	// first such cases are logged with the switch on or off.
+	static const bool targets_apart = [] {
+		const char* value = std::getenv("KYTY_STENCIL_TARGETS_APART");
+		return value != nullptr && value[0] == '1';
+	}();
 	ImageId association {};
 	for (const auto id: FindImagesInRegion(stencil.address, stencil.size, false)) {
 		const auto owner = m_slot_images.try_get(id);
 		if (owner != nullptr && owner->info.data == stencil &&
 		    owner->info.extent == depth.info.extent) {
+			if (owner->usage.render_target || owner->usage.depth_target) {
+				if (static std::atomic<uint32_t> reports {0};
+				    reports.fetch_add(1, std::memory_order_relaxed) < 4) {
+					std::printf("TextureCache: a %s target at 0x%" PRIx64
+					            " shares its range with a depth image's stencil plane: %s\n",
+					            owner->usage.depth_target ? "depth" : "color", stencil.address,
+					            targets_apart ? "kept apart" : "taken as the stencil record");
+				}
+				if (targets_apart) {
+					continue;
+				}
+			}
 			association = id;
 		}
 	}
