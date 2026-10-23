@@ -35,6 +35,7 @@
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 
 #include <algorithm>
+#include <tuple>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -535,7 +536,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	CpGaps::Phase(CpGaps::Cat::DispatchRebind);
 	RebindImages(bindings);
 	BindComputeLds(input_info, bindings, input_info.workgroup_counts);
+	m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
 	RebindBuffers(bindings);
+	// KYTY_REBIND_AFTER_JOIN: a later binding's lookup joined a buffer an earlier one resolved.
+	if (RebindAfterJoinEnabled()) {
+		auto& cache = m_context.GetBufferCache();
+		for (uint32_t pass = 0; pass < 4 && cache.UnregisterEpoch() != m_rebind_epoch; pass++) {
+			NoteRebindAfterJoin("dispatch", nullptr);
+			m_rebind_epoch = cache.UnregisterEpoch();
+			RebindBuffers(bindings);
+		}
+	}
 	CpGaps::Phase(CpGaps::Cat::DispatchEmit);
 
 	PreparedBindings* descriptor_stage = &bindings;
@@ -808,10 +819,23 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	BindComputeLds(input_info, bindings, nullptr);
 	RebindImages(bindings);
 	// Acquiring arguments can merge cache buffers; finalize shader bindings afterward.
-	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
+	m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
+	auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
+	// KYTY_REBIND_AFTER_JOIN: the bindings' lookups joined the argument buffer (or one another's).
+	if (RebindAfterJoinEnabled()) {
+		auto& cache = m_context.GetBufferCache();
+		for (uint32_t pass = 0; pass < 4 && cache.UnregisterEpoch() != m_rebind_epoch; pass++) {
+			NoteRebindAfterJoin("indirect dispatch", nullptr);
+			m_rebind_epoch               = cache.UnregisterEpoch();
+			std::tie(args_buffer, args_offset) =
+			    cache.ObtainBuffer(args_addr, sizeof(vk::DispatchIndirectCommand), false);
+			EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+			RebindBuffers(bindings);
+		}
+	}
 	CpGaps::Phase(CpGaps::Cat::DispatchEmit);
 	PreparedBindings* descriptor_stage = &bindings;
 	// Emission safe point (see DispatchDirect).

@@ -4082,6 +4082,36 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			indirect_buffers = ObtainIndirectBuffers(buffer, *indirect);
 		}
 	}
+	// KYTY_REBIND_AFTER_JOIN: a buffer the bindings resolved was retired since (a later lookup of
+	// this draw - another binding, a vertex, index or argument range - joined it into a new
+	// buffer): the recorded draw would read and write a buffer nothing uses again, its writes lost
+	// while the range stays GPU-owned. Resolve the buffers and the per-draw ranges again while the
+	// count moves (at most 4 times).
+	if (RebindAfterJoinEnabled()) {
+		auto& cache = m_context.GetBufferCache();
+		for (uint32_t pass = 0; pass < 4 && cache.UnregisterEpoch() != m_rebind_epoch; pass++) {
+			NoteRebindAfterJoin("draw", draw.Name());
+			m_rebind_epoch = cache.UnregisterEpoch();
+			{
+				const BufferCache::UploadBatch upload_batch(cache);
+				for (auto* stage: stages) {
+					RebindBuffers(*stage);
+				}
+			}
+			if (!mesh_active) {
+				vertex_bindings = PreparedVertexBuffers {};
+				if (CpCommit::Enabled(CpCommit::Part::Draws)) {
+					AcquireVertexBuffersInto(buffer, state.vertex_info[0], nullptr, vertex_bindings);
+				} else {
+					vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0], nullptr);
+				}
+				index_binding = PrepareIndexBuffer(buffer, index_source);
+			}
+			if (indirect != nullptr) {
+				indirect_buffers = ObtainIndirectBuffers(buffer, *indirect);
+			}
+		}
+	}
 	// KYTY_DRAW_RUN=verify: whether the kept images would have passed the check above (the normal
 	// path's own texture resolution ran before it here). A draw that would have fallen back is
 	// not compared.

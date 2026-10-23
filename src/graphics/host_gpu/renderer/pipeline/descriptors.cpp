@@ -2340,6 +2340,26 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	check_claimed_views();
 }
 
+// KYTY_REBIND_AFTER_JOIN=1 (default off; chenxiao07/KytyPS5 ed6f063e1): a draw or dispatch whose
+// resolved buffers lost one to a join (BufferCache::UnregisterEpoch moved) resolves them again
+// before it is recorded. The first 16 occurrences are logged.
+bool RebindAfterJoinEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_REBIND_AFTER_JOIN");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
+void NoteRebindAfterJoin(const char* kind, const char* name) {
+	static std::atomic<uint32_t> count {0};
+	const auto n = count.fetch_add(1, std::memory_order_relaxed);
+	if (n < 16 || (n & (n - 1)) == 0) {
+		std::printf("Kyty rebind after join: a %s's buffers resolved again (%s; %u so far)\n", kind,
+		            name != nullptr ? name : "-", n + 1);
+	}
+}
+
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo> colors, bool keep_images) {
 	bool uses_dma = false;
@@ -2395,6 +2415,8 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	// The uploads of every stage share one barrier pair (KYTY_UPLOAD_BATCH).
 	{
 		const BufferCache::UploadBatch upload_batch(m_context.GetBufferCache());
+		// KYTY_REBIND_AFTER_JOIN: the count the draw checks after its per-draw ranges.
+		m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
 		for (auto* stage: stages) {
 			RebindBuffers(*stage);
 		}
