@@ -277,14 +277,14 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 
 	const auto& rt      = hw.GetRenderTarget(rt_slot);
 	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
-	if (ignore_target_mask && rt.base.addr != 0 && mask == 0) {
+	if (ignore_target_mask && render_target_bound(rt) && mask == 0) {
 		mask = 0x0f;
 	}
 
 	// KYTY_RENDER_STATE_FAST reset: both paths below that resolve a target assign every field of
 	// the entry (desc, image_id, target_slot, guest_mip_level, guest_array_layer, export_mapping;
 	// SameRenderColorInfo names them all), so only an entry without a target is value-initialised.
-	const bool output = rt.base.addr != 0 && mask != 0;
+	const bool output = render_target_bound(rt) && mask != 0;
 	if (!output || !RenderStateFastEnabled(RenderStatePart::Reset)) {
 		r = {};
 	}

@@ -251,7 +251,7 @@ bool PredictTargets(const GraphicContext& graphics, const HW::Context& ctx,
 			continue;
 		}
 		const auto& rt = ctx.GetRenderTarget(slot);
-		if (rt.base.addr == 0 || render_target_mask_slot(ctx.GetRenderTargetMask(), slot) == 0) {
+		if (!render_target_bound(rt) || render_target_mask_slot(ctx.GetRenderTargetMask(), slot) == 0) {
 			continue; // no target in this slot
 		}
 		// KYTY_MRT_SPLIT (renderDraw.cpp): a surface bound to two slots splits the draw; no plan.

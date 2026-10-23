@@ -1196,7 +1196,7 @@ bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer,
 	const auto target_mask = hw.GetRenderTargetMask();
 	for (uint32_t slot = 0; slot < 8; slot++) {
 		const auto& rt = hw.GetRenderTarget(slot);
-		if (rt.base.addr == 0 || (slot != 0 && render_target_mask_slot(target_mask, slot) == 0)) {
+		if (!render_target_bound(rt) || (slot != 0 && render_target_mask_slot(target_mask, slot) == 0)) {
 			continue;
 		}
 		const bool dcc = rt.info.dcc_compression_enable && rt.dcc_addr.addr != 0;
@@ -1994,7 +1994,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 		const auto output_filter = DrawColorOutputFilter(ctx);
 		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 			const auto& rt = ctx.GetRenderTarget(slot);
-			if (rt.base.addr != 0 && render_target_mask_slot(ctx.GetRenderTargetMask(), slot) != 0 &&
+			if (render_target_bound(rt) && render_target_mask_slot(ctx.GetRenderTargetMask(), slot) != 0 &&
 			    (output_filter & (1u << slot)) != 0) {
 				target_export_mapping[slot] =
 				    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
