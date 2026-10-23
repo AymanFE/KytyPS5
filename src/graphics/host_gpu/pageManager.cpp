@@ -165,9 +165,81 @@ struct DeferProtectCounters {
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> race_pages {0}; // tightened while another thread's host update ran
 	std::atomic<uint64_t> lost_pages {0}; // recorded looser than their counts, not pending
+	std::atomic<uint64_t> cowatch_pages {0};   // synchronous write watches of pending pages
+	std::atomic<uint64_t> cowatch_applied {0}; // of which applied by that watch (the fix)
+	std::atomic<uint64_t> window_pages {0};    // KYTY_DEFER_PROTECTS_WINDOW_AUDIT: pages hashed
+	std::atomic<uint64_t> window_writes {0};   // changed between pending and protected
+	std::atomic<uint64_t> cowatch_writes {0};  // changed between a co-watch and protected
 };
 DeferProtectCounters  g_dp;
 std::atomic<uint32_t> g_dp_lost_logged {0};
+std::atomic<uint32_t> g_dp_cowatch_logged {0};
+
+// KYTY_DEFER_PROTECTS_COWATCH (live, default on; only matters with KYTY_DEFER_PROTECTS on): a
+// synchronous write watch (the texture cache watching an image, any watch outside a
+// DeferProtectsScope) of a page whose write protection is still pending applies that protection
+// before it returns, as every synchronous watch did before deferral existed: its caller relies on
+// the next guest write faulting (TextureCache refresh, StagingCopier). The page's pending span sits
+// on the DMA worker's job, which only orders the buffer copy that follows it; without this a write
+// between the image's copy and the worker's apply reaches neither the image (no fault) nor any
+// later refresh. =0 restores the old behaviour (the watch only raises the counts).
+Live::Switch g_defer_cowatch("KYTY_DEFER_PROTECTS_COWATCH", Live::ParseDefaultOn);
+
+// KYTY_DEFER_PROTECTS_WINDOW_AUDIT=1 (diagnostic, default off, Windows): hashes every page when it
+// becomes pending, again when a synchronous watch finds it pending (a co-watch), and once more
+// when its protection is recorded. window_writes counts pages whose bytes changed between pending
+// and protected (guest writes that never faulted; the buffer copy that follows the apply still
+// sees them), cowatch_writes pages that changed after a co-watch and before the protection (a
+// write the co-watcher, e.g. an image, never learns about). Expensive: a 4 KiB hash per page at
+// each point. =N hashes only every Nth page that becomes pending (co-watched pages always).
+uint64_t WindowAuditSample() {
+	static const uint64_t sample = [] {
+		const auto* value = std::getenv("KYTY_DEFER_PROTECTS_WINDOW_AUDIT");
+		return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
+	}();
+	return sample;
+}
+bool WindowAuditEnabled() {
+	return WindowAuditSample() != 0;
+}
+bool WindowAuditPick() {
+	static std::atomic<uint64_t> counter {0};
+	return counter.fetch_add(1, std::memory_order_relaxed) % WindowAuditSample() == 0;
+}
+
+// Hash of the guest page at `address` through the guest view, or 0 when the host does not let it
+// be read now (the audit never faults inside the page manager).
+uint64_t AuditHashPage(uint64_t address) noexcept {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 ||
+	    info.State != MEM_COMMIT) {
+		return 0;
+	}
+	switch (info.Protect & 0xffu) {
+		case PAGE_READONLY:
+		case PAGE_READWRITE:
+		case PAGE_WRITECOPY:
+		case PAGE_EXECUTE_READ:
+		case PAGE_EXECUTE_READWRITE:
+		case PAGE_EXECUTE_WRITECOPY: break;
+		default: return 0;
+	}
+	if ((info.Protect & PAGE_GUARD) != 0) {
+		return 0;
+	}
+	const auto* words = reinterpret_cast<const volatile uint64_t*>(address);
+	uint64_t    hash  = 0xcbf29ce484222325ull;
+	for (size_t index = 0; index < PAGE_SIZE / sizeof(uint64_t); index++) {
+		hash = (hash ^ words[index]) * 0x100000001b3ull;
+		hash ^= hash >> 29u;
+	}
+	return hash | 1u; // never 0
+#else
+	(void)address;
+	return 0;
+#endif
+}
 
 // KYTY_DEFER_PROTECTS_RACE=old (diagnostic, default off): a deferred tighten trusts `applied` even
 // while another thread's host update of the region is in flight (the behaviour before the fix);
@@ -311,7 +383,54 @@ struct PageManager::Impl {
 		// protection was deferred (until a host update records them). Under `lock`.
 		std::bitset<REGION_PAGES> pending;
 		uint32_t                  pending_count = 0;
+		uint64_t                  base          = 0; // guest address of page 0
+		// KYTY_DEFER_PROTECTS_WINDOW_AUDIT: page hashes taken when the page became pending and at
+		// its last co-watch (0: none). Under `lock`; allocated on first use.
+		struct AuditHashes {
+			std::array<uint64_t, REGION_PAGES> pending {};
+			std::array<uint64_t, REGION_PAGES> cowatch {};
+		};
+		std::unique_ptr<AuditHashes> audit;
 	};
+
+	static Region::AuditHashes& Audit(Region& region) {
+		if (region.audit == nullptr) {
+			region.audit = std::make_unique<Region::AuditHashes>();
+		}
+		return *region.audit;
+	}
+	// Caller holds `lock`: the page's pending state ends; with `protected_now` (its protection was
+	// just recorded, the host call made) the audit compares its bytes with the earlier hashes.
+	static void EndAudit(Region& region, size_t page, bool protected_now) noexcept {
+		if (region.audit == nullptr) {
+			return;
+		}
+		auto&      hashes  = *region.audit;
+		const auto pending = std::exchange(hashes.pending[page], 0);
+		const auto cowatch = std::exchange(hashes.cowatch[page], 0);
+		if (!protected_now || (pending == 0 && cowatch == 0)) {
+			return;
+		}
+		const auto address = region.base + page * PAGE_SIZE;
+		const auto now     = AuditHashPage(address);
+		if (now == 0) {
+			return;
+		}
+		if (pending != 0 && pending != now) {
+			g_dp.window_writes.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (cowatch != 0 && cowatch != now) {
+			g_dp.cowatch_writes.fetch_add(1, std::memory_order_relaxed);
+			if (g_dp_cowatch_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+				std::fprintf(stderr,
+				             "DeferProtects audit: page 0x%016" PRIx64
+				             " changed after a synchronous watch found it pending, before its"
+				             " protection (a write the co-watcher never saw)\n",
+				             address);
+				std::fflush(stderr);
+			}
+		}
+	}
 
 	// Caller holds `lock`.
 	static void ClearPending(Region& region, size_t first, size_t last) noexcept {
@@ -323,6 +442,7 @@ struct PageManager::Impl {
 				region.pending.reset(page);
 				region.pending_count--;
 				g_dp.pending_pages.fetch_sub(1, std::memory_order_relaxed);
+				EndAudit(region, page, false);
 			}
 		}
 	}
@@ -338,6 +458,7 @@ struct PageManager::Impl {
 					region.pending.reset(page);
 					region.pending_count--;
 					g_dp.pending_pages.fetch_sub(1, std::memory_order_relaxed);
+					EndAudit(region, page, level != Level::ReadWrite);
 				}
 			} else if (stricter) [[unlikely]] {
 				// The race the fix closes (KYTY_DEFER_PROTECTS_RACE=old): nothing protects it now,
@@ -443,6 +564,7 @@ struct PageManager::Impl {
 		}
 		auto  region = std::make_unique<Region>();
 		auto* ptr    = region.get();
+		ptr->base    = index * REGION_SIZE;
 		region_storage.push_back(std::move(region));
 		regions[index].store(ptr, std::memory_order_release);
 		return ptr;
@@ -776,6 +898,11 @@ struct PageManager::Impl {
 						region.pending.set(page_index);
 						region.pending_count++;
 						g_dp.pending_pages.fetch_add(1, std::memory_order_relaxed);
+						if (WindowAuditEnabled() && level == Level::Read && WindowAuditPick()) [[unlikely]] {
+							Audit(region).pending[page_index] =
+							    AuditHashPage(base_addr + page_index * PAGE_SIZE);
+							g_dp.window_pages.fetch_add(1, std::memory_order_relaxed);
+						}
 					}
 					lo = std::min(lo, page_index);
 					hi = page_index + 1;
@@ -842,6 +969,65 @@ struct PageManager::Impl {
 		});
 	}
 
+	// Caller holds both locks, after a synchronous write watch of pages [first, last) updated the
+	// counts (KYTY_DEFER_PROTECTS_COWATCH): the pending pages of the range whose counts ask for more
+	// than their recorded protection get it now (with `runs`, after `lock`; otherwise here), so the
+	// watch returns with every page it selects protected, as the caller (an image) assumes. Pages
+	// selected or not: protecting a pending page early is always allowed. The pending span on the
+	// other thread's list settles them when it is applied.
+	void CoWatchPendingLocked(Region& region, uint64_t base_addr, size_t first, size_t last,
+	                          RunList* runs) noexcept {
+		const bool fix   = g_defer_cowatch.On();
+		const bool audit = WindowAuditEnabled();
+		uint64_t   seen  = 0;
+		uint64_t   fixed = 0;
+		bool       open  = false;
+		size_t     run_begin = 0;
+		size_t     run_end   = 0;
+		Level      run_level = Level::ReadWrite;
+		const auto flush = [&] {
+			if (open) {
+				if (runs == nullptr || !runs->Add(run_begin, run_end, run_level)) {
+					ProtectRun(region, base_addr, run_begin, run_end, ToMode(run_level));
+				}
+				open = false;
+			}
+		};
+		for (size_t page = first; page < last; page++) {
+			if (!region.pending.test(page)) {
+				flush();
+				continue;
+			}
+			const auto desired = ToLevel(region.pages[page].Perms());
+			if (desired <= region.applied[page]) {
+				flush();
+				continue;
+			}
+			seen++;
+			if (audit && region.applied[page] != Level::NoAccess) [[unlikely]] {
+				Audit(region).cowatch[page] = AuditHashPage(base_addr + page * PAGE_SIZE);
+			}
+			if (!fix) {
+				continue;
+			}
+			fixed++;
+			if (open && run_level == desired && run_end == page) {
+				run_end = page + 1;
+			} else {
+				flush();
+				open      = true;
+				run_begin = page;
+				run_end   = page + 1;
+				run_level = desired;
+			}
+		}
+		flush();
+		if (seen != 0) {
+			g_dp.cowatch_pages.fetch_add(seen, std::memory_order_relaxed);
+			g_dp.cowatch_applied.fetch_add(fixed, std::memory_order_relaxed);
+		}
+	}
+
 	template <bool track, bool is_read, bool masked>
 	void UpdateRegionWatchers(Region& region, uint64_t base_addr, size_t first, size_t last,
 	                          const RegionBits* mask = nullptr) {
@@ -878,6 +1064,12 @@ struct PageManager::Impl {
 			SpinGuard counts(region.lock);
 			UpdateCountsLocked<track, is_read, masked>(region, base_addr, first, last, mask,
 			                                           mode == DeferMode::Off ? nullptr : &runs);
+			if constexpr (track && !is_read) {
+				if (region.pending_count != 0) [[unlikely]] {
+					CoWatchPendingLocked(region, base_addr, first, last,
+					                     mode == DeferMode::Off ? nullptr : &runs);
+				}
+			}
 		}
 		// With deferral on, the host calls leave `lock`: a deferred release on another thread (the
 		// only change possible meanwhile) never waits for them.
@@ -1122,6 +1314,11 @@ PageManager::DeferProtectsStats PageManager::GetDeferProtectsStats() noexcept {
 	stats.verify_mismatches = g_dp.verify_mismatches.load(std::memory_order_relaxed);
 	stats.race_pages        = g_dp.race_pages.load(std::memory_order_relaxed);
 	stats.lost_pages        = g_dp.lost_pages.load(std::memory_order_relaxed);
+	stats.cowatch_pages     = g_dp.cowatch_pages.load(std::memory_order_relaxed);
+	stats.cowatch_applied   = g_dp.cowatch_applied.load(std::memory_order_relaxed);
+	stats.window_pages      = g_dp.window_pages.load(std::memory_order_relaxed);
+	stats.window_writes     = g_dp.window_writes.load(std::memory_order_relaxed);
+	stats.cowatch_writes    = g_dp.cowatch_writes.load(std::memory_order_relaxed);
 	return stats;
 }
 
@@ -1149,11 +1346,14 @@ void PageManager::NoteCpFlip() noexcept {
 	            " cp_ns %" PRIu64 " spans %" PRIu64 " pages %" PRIu64 " worker_spans %" PRIu64
 	            " worker_calls %" PRIu64 " worker_ns %" PRIu64 " local_spans %" PRIu64
 	            " local_calls %" PRIu64 " leftover %" PRIu64 " pending %" PRIu64 " vchecks %" PRIu64
-	            " vmismatches %" PRIu64 " race_pages %" PRIu64 " lost_pages %" PRIu64 "\n",
+	            " vmismatches %" PRIu64 " race_pages %" PRIu64 " lost_pages %" PRIu64
+	            " cowatch_pages %" PRIu64 " cowatch_applied %" PRIu64 " window_pages %" PRIu64
+	            " window_writes %" PRIu64 " cowatch_writes %" PRIu64 "\n",
 	            Live::Testing::CpFlips(), DeferProtectsMode(), cp.calls, cp.pages, cp.ns, dp.spans,
 	            dp.pages, dp.worker_spans, dp.worker_calls, dp.worker_ns, dp.local_spans,
 	            dp.local_calls, dp.leftover_spans, dp.pending_pages, dp.verify_checks,
-	            dp.verify_mismatches, dp.race_pages, dp.lost_pages);
+	            dp.verify_mismatches, dp.race_pages, dp.lost_pages, dp.cowatch_pages,
+	            dp.cowatch_applied, dp.window_pages, dp.window_writes, dp.cowatch_writes);
 	std::fflush(stdout);
 }
 

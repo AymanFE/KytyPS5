@@ -84,7 +84,10 @@ public:
 	// same pages (each change sets what the counts ask for the pages it changes; a pending page only
 	// stays looser until it is applied). BufferCache: read uploads whose guest bytes the upload DMA
 	// worker copies hand the list to the worker with the copy; every other path applies it on the
-	// calling thread before its own copy.
+	// calling thread before its own copy. A synchronous write watch (outside a scope: the texture
+	// cache) of a pending page applies that page's protection itself before it returns
+	// (KYTY_DEFER_PROTECTS_COWATCH, default on), since its caller copies the bytes next and relies
+	// on the following guest write faulting.
 	struct PendingProtect {
 		PageManager* manager = nullptr;
 		void*        region  = nullptr; // Impl::Region
@@ -136,6 +139,17 @@ public:
 		// counts without being pending (0 unless KYTY_DEFER_PROTECTS_RACE=old).
 		uint64_t race_pages = 0;
 		uint64_t lost_pages = 0;
+		// Synchronous write watches (an image) that found pages still pending, and the pages they
+		// protected at once (KYTY_DEFER_PROTECTS_COWATCH, default on).
+		uint64_t cowatch_pages   = 0;
+		uint64_t cowatch_applied = 0;
+		// KYTY_DEFER_PROTECTS_WINDOW_AUDIT=1: pages hashed when they became pending; of those, pages
+		// whose bytes changed before their protection (unfaulted guest writes the buffer copy still
+		// sees); pages that changed after a co-watch and before their protection (writes the
+		// co-watcher never sees).
+		uint64_t window_pages   = 0;
+		uint64_t window_writes  = 0;
+		uint64_t cowatch_writes = 0;
 	};
 	[[nodiscard]] static DeferProtectsStats GetDeferProtectsStats() noexcept;
 	// Host protection calls made by the calling thread (cumulative): count, pages, ns.

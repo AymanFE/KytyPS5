@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/hangWatchdog.h"
+#include "common/liveSwitch.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
@@ -10,9 +11,11 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <utility>
 
 namespace Libs::Graphics {
@@ -46,6 +49,14 @@ bool UploadDmaVerify() {
 bool UploadDmaHostCopyEnabled() {
 	static const bool enabled = EnvU64("KYTY_UPLOAD_DMA_HOST_COPY", 1) != 0;
 	return enabled;
+}
+
+namespace {
+Live::Switch g_write_drain("KYTY_UPLOAD_DMA_WRITE_DRAIN", Live::ParseDefaultOff);
+} // namespace
+
+bool UploadDmaWriteDrainEnabled() {
+	return g_write_drain.On();
 }
 
 std::unique_ptr<UploadDma> UploadDma::Create(GraphicContext& graphics, CommandScheduler& scheduler) {
@@ -194,6 +205,24 @@ std::optional<uint64_t> UploadDma::Stage(vk::Buffer source, uint64_t source_offs
 		Profiler::CountFrameEvent(Profiler::FrameEvent::UploadDmaHostCopyBytes, bytes);
 		copies.swap(*host_copies);
 	}
+	if (!copies.empty() && UploadDmaWriteDrainEnabled()) {
+		// KYTY_UPLOAD_DMA_WRITE_DRAIN: remember which guest bytes this job still has to read.
+		const auto value = m_enqueued + 1;
+		for (const auto& copy: copies) {
+			if (copy.guest == 0) {
+				continue;
+			}
+			const auto end = copy.guest + copy.size;
+			auto&      back = m_host_ranges;
+			if (!back.empty() && back.back().value == value && back.back().end == copy.guest) {
+				back.back().end = end;
+			} else {
+				back.push_back({value, copy.guest, end});
+			}
+			m_host_lo = std::min(m_host_lo, copy.guest);
+			m_host_hi = std::max(m_host_hi, end);
+		}
+	}
 	{
 		std::scoped_lock lock(m_mutex);
 		EXIT_IF(m_stopping);
@@ -205,6 +234,62 @@ std::optional<uint64_t> UploadDma::Stage(vk::Buffer source, uint64_t source_offs
 	m_stage_tick  = m_scheduler.CurrentTick();
 	m_stage_value = m_enqueued;
 	return offset;
+}
+
+bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size) {
+	if (m_host_ranges.empty() || size == 0) {
+		return false;
+	}
+	const auto end = address + size;
+	if (end <= m_host_lo || address >= m_host_hi) {
+		return false;
+	}
+	m_drain.checks++;
+	auto copied = m_copied.load(std::memory_order_acquire);
+	while (!m_host_ranges.empty() && m_host_ranges.front().value <= copied) {
+		m_host_ranges.pop_front();
+	}
+	uint64_t needed = 0;
+	for (const auto& range: m_host_ranges) {
+		if (address < range.end && range.begin < end) {
+			needed = std::max(needed, range.value);
+		}
+	}
+	if (m_host_ranges.empty()) {
+		m_host_lo = UINT64_MAX;
+		m_host_hi = 0;
+	}
+	if (needed == 0) {
+		return false;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	{
+		HangWatchdog::Scope wait_scope("upload-dma-write-drain", reinterpret_cast<uint64_t>(this),
+		                               needed, copied);
+		while (copied < needed) {
+			m_copied.wait(copied, std::memory_order_acquire);
+			copied = m_copied.load(std::memory_order_acquire);
+		}
+	}
+	const auto ns = static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+	        .count());
+	m_drain.waits++;
+	m_drain.wait_ns += ns;
+	static const bool log = EnvU64("KYTY_UPLOAD_DMA_WRITE_DRAIN_LOG", 0) != 0;
+	if (log && m_drain.waits <= 16) {
+		std::printf("Upload DMA write drain: CP write [0x%016" PRIx64 ", +0x%" PRIx64
+		            ") waited %" PRIu64 " ns for queued host copy %" PRIu64 "\n",
+		            address, size, ns, needed);
+		std::fflush(stdout);
+	}
+	if ((m_drain.waits & 0xfffu) == 1 && log) {
+		std::printf("Upload DMA write drain: %" PRIu64 " checks, %" PRIu64 " waits, %" PRIu64
+		            " us waited\n",
+		            m_drain.checks, m_drain.waits, m_drain.wait_ns / 1000);
+		std::fflush(stdout);
+	}
+	return true;
 }
 
 uint64_t UploadDma::PendingValue() {
@@ -362,9 +447,32 @@ void UploadDma::Worker(std::stop_token stop) {
 		uint64_t copied = 0;
 		// KYTY_DEFER_PROTECTS: the pages' write protections first, so a guest write landing before
 		// them is in the copy and every later one faults.
+		// KYTY_DEFER_PROTECTS_DELAY_US=N (diagnostic, default 0): waits N us before applying them,
+		// widening the window in which the pages are clean in the tracker but still writable.
+		// KYTY_DEFER_PROTECTS_DELAY_MODE (controls for it): 0 waits before applying, only for
+		// batches with deferred protections; 1 waits after applying them (same worker latency,
+		// window closed); 2 waits before applying for every batch (also without deferral).
+		static const uint64_t delay_us   = EnvU64("KYTY_DEFER_PROTECTS_DELAY_US", 0);
+		static const uint64_t delay_mode = EnvU64("KYTY_DEFER_PROTECTS_DELAY_MODE", 0);
+		const auto            wait       = [&](uint64_t mode) {
+			if (delay_us == 0 || delay_mode != mode) {
+				return;
+			}
+			if (mode != 2 && std::none_of(jobs.begin(), jobs.end(),
+			                              [](const Job& job) { return !job.protects.empty(); })) {
+				return;
+			}
+			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+			while (std::chrono::steady_clock::now() < until) {
+				std::this_thread::yield();
+			}
+		};
+		wait(0);
+		wait(2);
 		for (const auto& job: jobs) {
 			PageManager::ApplyProtects(job.protects, true);
 		}
+		wait(1);
 		for (const auto& job: jobs) {
 			for (const auto& copy: job.host_copies) {
 				std::memcpy(copy.destination, copy.source, static_cast<size_t>(copy.size));
@@ -374,6 +482,9 @@ void UploadDma::Worker(std::stop_token stop) {
 		if (copied != 0) {
 			m_host_bytes_done.fetch_add(copied, std::memory_order_release);
 		}
+		// KYTY_UPLOAD_DMA_WRITE_DRAIN: the guest bytes of these jobs are read.
+		m_copied.store(jobs.back().value, std::memory_order_release);
+		m_copied.notify_all();
 		SubmitBatch(jobs);
 		jobs.clear();
 	}
