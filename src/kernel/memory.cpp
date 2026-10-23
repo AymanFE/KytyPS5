@@ -15,6 +15,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/cleanVerdictCache.h"
 #include "graphics/host_gpu/gpuReadDelegate.h"
+#include "graphics/host_gpu/gpuTouchedPages.h"
 #include "graphics/host_gpu/renderer/drawPrep/readSet.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/shader.h"
@@ -1169,10 +1170,52 @@ static bool IsGpuRangeCleanForBackingRead(uint64_t vaddr, uint64_t size) {
 	       !resources.GetTextureCache().IsRegionGpuModified(vaddr, size);
 }
 
+// KYTY_CLEAN_UNTOUCHED (drawPrep.cpp): no page of the range was ever touched by a GPU-side
+// transition (the sticky pages of gpuTouchedPages.h, maintained with KYTY_CP_SEQ=1). Such a range
+// is clean for a backing read: every source that can make the exact predicates below refuse it
+// marks its pages before its change becomes observable.
+static bool NeverGpuTouched(uint64_t vaddr, uint64_t size) {
+	return Graphics::GpuTouched::Enabled() && size != 0 && vaddr <= UINT64_MAX - size &&
+	       !Graphics::GpuTouched::g_pages.AnyTouched(vaddr, vaddr + size);
+}
+
+static std::atomic<uint64_t> g_untouched_verdict_checks {0};
+static std::atomic<uint64_t> g_untouched_verdict_mismatches {0};
+
+// verify / exit: an untouched range the exact predicates call unclean.
+static void VerifyUntouchedVerdict(uint64_t vaddr, uint64_t size, bool exact) {
+	const auto checks = g_untouched_verdict_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (!exact) {
+		const auto count = g_untouched_verdict_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 16) {
+			std::printf("CleanUntouched: untouched range [0x%" PRIx64 ", +0x%" PRIx64
+			            ") is not clean\n",
+			            vaddr, size);
+		}
+		if (Graphics::DrawPrep::UntouchedMode() == 3) {
+			EXIT("CleanUntouched: an untouched range is not clean\n");
+		}
+	}
+	if ((checks & 0xfffffu) == 0) {
+		std::printf("CleanUntouched verdict verify: %" PRIu64 " untouched queries, %" PRIu64
+		            " mismatches\n",
+		            checks, g_untouched_verdict_mismatches.load(std::memory_order_relaxed));
+	}
+}
+
 // The clean verdict of a GPU address range (verdict cache when enabled). GPU thread or an
 // active GpuReadDelegate scope.
 static bool QueryGpuCleanVerdict(uint64_t vaddr, uint64_t size) {
 	namespace CleanVerdict = Graphics::CleanVerdict;
+	if (const auto untouched = Graphics::DrawPrep::UntouchedMode();
+	    untouched != 0 && NeverGpuTouched(vaddr, size)) {
+		if (untouched == 1) {
+			return true;
+		}
+		const bool exact = IsGpuRangeCleanForBackingRead(vaddr, size);
+		VerifyUntouchedVerdict(vaddr, size, exact);
+		return exact;
+	}
 	if (!CleanVerdict::Enabled()) {
 		return IsGpuRangeCleanForBackingRead(vaddr, size);
 	}
@@ -1355,7 +1398,8 @@ static Graphics::DrawPrep::ReadFailure DrawPrepGate(const Graphics::DrawPrep::Re
 		                    size, caller);
 		return ReadFailure::Unclean;
 	}
-	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	    !(Graphics::DrawPrep::UntouchedMode() != 0 && NeverGpuTouched(vaddr, size))) {
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (GpuDirtyHint(buffers, vaddr, size)) {
 			NoteDrawPrepUnclean(Event::DrawPrepUncleanHintGpuDirty, "hint-gpu-dirty", vaddr, size,
@@ -1421,6 +1465,9 @@ static std::atomic<uint64_t> g_direct_read_mismatches {0};
 // page.
 static bool DrawPrepHintClean(uint64_t vaddr, uint64_t size) {
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return true;
+	}
+	if (Graphics::DrawPrep::UntouchedMode() != 0 && NeverGpuTouched(vaddr, size)) {
 		return true;
 	}
 	auto& buffers = GetGpuResources().GetBufferCache();
@@ -1580,6 +1627,9 @@ bool IsGpuCleanForReadSince(uint64_t vaddr, uint64_t size, uint64_t since) {
 	const auto last  = (vaddr + size - 1) >> CleanVerdict::PAGE_BITS;
 	if (first == 0 || last - first >= CleanVerdict::MAX_CACHED_PAGES) {
 		return QueryGpuCleanVerdict(vaddr, size);
+	}
+	if (Graphics::DrawPrep::UntouchedMode() == 1 && NeverGpuTouched(vaddr, size)) {
+		return true;
 	}
 	struct Entry {
 		uint64_t page       = 0;

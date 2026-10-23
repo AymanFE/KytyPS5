@@ -160,6 +160,9 @@ struct PreparedDraw {
 	// built by the preparing thread (certificate_built); Validate uses it for the log check.
 	std::vector<Coherence::Range> certificate;
 	bool                          certificate_built = false;
+	// KYTY_CLEAN_UNTOUCHED: no page of a read or digest range had ever been touched by a GPU-side
+	// transition when the preparation finished (GpuTouched, checked by the preparing thread).
+	bool reads_untouched = false;
 	// KYTY_DRAW_PREP_DISPATCH: a dispatch slot's preparation (GetComputeProgram's outputs).
 	ShaderComputeInputInfo   compute_info;
 	PipelineCache::StagePrep compute_prep;

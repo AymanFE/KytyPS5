@@ -341,6 +341,8 @@ inline thread_local Recorder* t_recorder = nullptr;
 // KYTY_DRAW_PREP_DIRECT_READS (drawPrep.cpp, kernel/memory.cpp): 0 off, 1 on, 2 verify, 3 exit.
 [[nodiscard]] int  DirectReadsMode();
 [[nodiscard]] bool DirectReadsEnabled();
+// KYTY_CLEAN_UNTOUCHED (drawPrep.cpp, kernel/memory.cpp): 0 off, 1 on, 2 verify, 3 exit.
+[[nodiscard]] int UntouchedMode();
 
 // Set on DrawPrep worker threads, which must never reach the scheduler or the caches
 // (CommandScheduler::CheckActive stops the emulator if one does).

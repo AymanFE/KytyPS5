@@ -307,6 +307,8 @@ bool PacketHookActive() {
 	return passive && tracy::ProfilerAvailable() && TracyIsConnected;
 }
 
+static bool ReadsUntouched(const PreparedDraw& prepared);
+
 void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, bool eligible,
              bool exact, PreparedDraw& prepared) {
 	prepared.program_compile_ns = 0;
@@ -318,6 +320,7 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
+	prepared.reads_untouched   = false;
 	if (!eligible) {
 		prepared.failure = Failure::Ineligible;
 		return;
@@ -368,6 +371,7 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 		prepared.reads.BuildCertificate(prepared.certificate);
 		prepared.certificate_built = true;
 	}
+	prepared.reads_untouched = ReadsUntouched(prepared);
 	Common::PrepPhases::Mark(Common::PrepPhases::Phase::Certificate);
 	prepared.ok = true;
 }
@@ -393,6 +397,59 @@ int DirectReadsMode() {
 
 bool DirectReadsEnabled() {
 	return g_direct_reads.Get() != 0;
+}
+
+// KYTY_CLEAN_UNTOUCHED (live, default 0; needs KYTY_CP_SEQ=1, which maintains the sticky
+// GPU-touched pages, gpuTouchedPages.h): a guest range none of whose pages any GPU-side transition
+// ever touched (buffer GPU-dirty ranges, tracker GPU marks, GPU-modified images, backing
+// publications: the only state that can make the exact clean predicate refuse a range) is clean
+// without running that predicate. The pages are marked inside Coherence::Log::Append before the
+// transition becomes observable and are never cleared, so "never touched" read after a state
+// change was observable cannot miss it.
+// - A preparation records whether all its read and digest ranges were untouched when it finished
+//   (reads_untouched, checked on the preparing thread). A log-mode certificate whose log check finds
+//   no transition touching those ranges since the preparation began then skips the "every range
+//   clean now" pass: an unclean range would need a transition after the generation the
+//   preparation loaded (the log check would have seen it) or before it (the preparing thread's
+//   check, made after that load, would have seen its mark).
+// - The clean-verdict query (kernel/memory.cpp) and the workers' read hint answer untouched ranges
+//   directly.
+// - The certificate's log walk first tests each entry against the hull of the certificate ranges.
+// verify: every shortcut also runs the exact check, uses its answer and counts the ranges the
+// shortcut called clean that are not; exit stops at the first.
+static int64_t ParseUntouched(const char* value) {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+}
+static Live::Switch g_clean_untouched("KYTY_CLEAN_UNTOUCHED", ParseUntouched);
+
+int UntouchedMode() {
+	return static_cast<int>(g_clean_untouched.Get());
+}
+
+static bool RangesUntouched(std::span<const Coherence::Range> ranges) {
+	for (const auto& range: ranges) {
+		if (GpuTouched::g_pages.AnyTouched(range.begin, range.end)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// The preparing thread, after the read set is final (and its certificate built, if any).
+static bool ReadsUntouched(const PreparedDraw& prepared) {
+	if (g_clean_untouched.Get() == 0 || !GpuTouched::Enabled()) {
+		return false;
+	}
+	if (prepared.certificate_built) {
+		return RangesUntouched(prepared.certificate);
+	}
+	return RangesUntouched(prepared.reads.Ranges()) && RangesUntouched(prepared.reads.DigestRanges());
 }
 
 // Live (common/liveSwitch.h): the sequencer reads it per dispatch it parses; the op carries the
@@ -436,6 +493,7 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
+	prepared.reads_untouched   = false;
 	if (!eligible) {
 		prepared.failure = Failure::Ineligible;
 		return;
@@ -473,6 +531,7 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 		prepared.reads.BuildCertificate(prepared.certificate);
 		prepared.certificate_built = true;
 	}
+	prepared.reads_untouched = ReadsUntouched(prepared);
 	prepared.ok = true;
 }
 
@@ -583,7 +642,43 @@ static Live::Switch g_clean_since("KYTY_DRAW_PREP_CLEAN_SINCE", ParseCleanSince)
 static std::atomic<uint64_t> g_clean_since_checks {0};
 static std::atomic<uint64_t> g_clean_since_mismatches {0};
 
+static std::atomic<uint64_t> g_untouched_checks {0};
+static std::atomic<uint64_t> g_untouched_hits {0};
+static std::atomic<uint64_t> g_untouched_mismatches {0};
+
 static bool AllCleanAfterLog(const PreparedDraw& prepared) {
+	if (const auto untouched = g_clean_untouched.Get(); untouched != 0) {
+		if (untouched == 1) {
+			if (prepared.reads_untouched) {
+				return true;
+			}
+		} else {
+			// verify: the exact pass decides; count how often the shortcut applies and errs.
+			const bool exact = prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
+			const auto checks = g_untouched_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (prepared.reads_untouched) {
+				g_untouched_hits.fetch_add(1, std::memory_order_relaxed);
+				if (!exact) {
+					const auto count = g_untouched_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+					if (count <= 16) {
+						std::printf("CleanUntouched: a certificate with untouched ranges is not clean "
+						            "(%zu ranges)\n",
+						            prepared.reads.Ranges().size());
+					}
+					if (untouched == 3) {
+						EXIT("CleanUntouched: a certificate with untouched ranges is not clean\n");
+					}
+				}
+			}
+			if ((checks & 0x3ffffu) == 0) {
+				std::printf("CleanUntouched verify: %" PRIu64 " certificates, %" PRIu64
+				            " untouched, %" PRIu64 " mismatches\n",
+				            checks, g_untouched_hits.load(std::memory_order_relaxed),
+				            g_untouched_mismatches.load(std::memory_order_relaxed));
+			}
+			return exact;
+		}
+	}
 	const auto mode = g_clean_since.Get();
 	if (mode == 0) {
 		return prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
@@ -634,7 +729,7 @@ static bool CertificateHolds(PreparedDraw& prepared, Failure& failure) {
 		const auto cert_ranges = CommitCertificateRanges(prepared, log_scratch);
 		const auto outcome =
 		    Coherence::g_log.Check(prepared.coherence_generation, Coherence::Generation(),
-		                           cert_ranges);
+		                           cert_ranges, g_clean_untouched.Get() != 0);
 		if (stats_start != 0) {
 			CommitStats::AddSub(CommitStats::Sub::ValLog, CommitStats::Now() - stats_start);
 			CommitStats::AddItems(CommitStats::Item::LogEntries, outcome.entries);
