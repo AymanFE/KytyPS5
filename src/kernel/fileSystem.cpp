@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
 #include <climits>
 #include <cstdio>
 #include <cstring>
@@ -690,6 +691,54 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	return bytes_read;
 }
 
+// A file write from guest memory. The host kernel reads the guest buffer without the emulator's
+// fault path, so a page the GPU trackers keep from reads (no access: a page the GPU wrote and the
+// CPU has not read back yet) ends WriteFile there (ERROR_NOACCESS, a short count) and the guest got
+// a short write with the bytes never written. From where a write stopped short inside GPU-mapped
+// memory, a piece is copied out by a user-mode read, which takes the fault path (the page is read
+// back), and written from there; then the direct write goes on. Memory outside the GPU's mapped
+// ranges is not copied (nothing would resolve the fault): the write stops short there, as before.
+// The read side is SysFileRead's ERROR_NOACCESS retry. Idea from chenxiao07/KytyPS5 107c1b832 /
+// af3788836 (WriteFromGuest).
+static void WriteFromGuest(Common::File& f, const void* buf, uint32_t nbytes,
+                           uint32_t* bytes_written) {
+	constexpr uint32_t                Chunk = 1u << 20u;
+	thread_local std::vector<uint8_t> bounce;
+	const auto*                       bytes = static_cast<const uint8_t*>(buf);
+	uint32_t                          total = 0;
+	while (total < nbytes) {
+		uint32_t done = 0;
+		f.Write(bytes + total, nbytes - total, &done);
+		total += done;
+		if (total == nbytes) {
+			break;
+		}
+		const uint32_t want = std::min(nbytes - total, Chunk);
+		if (!Memory::IsGpuMapped(reinterpret_cast<uint64_t>(bytes + total), want)) {
+			break;
+		}
+		static std::atomic<uint32_t> reports {0};
+		if (reports.fetch_add(1, std::memory_order_relaxed) < 4) {
+			std::printf("FileSystem: a write from guest memory stopped at a page the host cannot "
+			            "read (0x%" PRIx64 "): copied out through a host buffer\n",
+			            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(bytes + total)));
+		}
+		if (bounce.size() < want) {
+			bounce.resize(want);
+		}
+		std::memcpy(bounce.data(), bytes + total, want);
+		done = 0;
+		f.Write(bounce.data(), want, &done);
+		total += done;
+		if (done < want) {
+			break;
+		}
+	}
+	if (bytes_written != nullptr) {
+		*bytes_written = total;
+	}
+}
+
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	PRINT_NAME();
 
@@ -738,7 +787,7 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	if (file->append) {
 		file->f.Seek(file->f.Size());
 	}
-	file->f.Write(buf, static_cast<uint32_t>(nbytes), &bytes_written);
+	WriteFromGuest(file->f, buf, static_cast<uint32_t>(nbytes), &bytes_written);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileWriteBytes, bytes_written);
 	if (file->sync_writes) {
 		file->f.Flush();
@@ -972,7 +1021,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 	auto     pos           = file->f.Tell();
 	uint32_t bytes_written = 0;
 	file->f.Seek(file->append ? file->f.Size() : static_cast<uint64_t>(offset));
-	file->f.Write(buf, static_cast<uint32_t>(nbytes), &bytes_written);
+	WriteFromGuest(file->f, buf, static_cast<uint32_t>(nbytes), &bytes_written);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileWriteBytes, bytes_written);
 	if (file->sync_writes) {
 		file->f.Flush();
@@ -1044,7 +1093,7 @@ static int64_t Writev(int d, const KernelIovec* iov, int iovcnt, std::optional<i
 			continue;
 		}
 		uint32_t bytes = 0;
-		file->f.Write(buffer.iov_base, static_cast<uint32_t>(buffer.iov_len), &bytes);
+		WriteFromGuest(file->f, buffer.iov_base, static_cast<uint32_t>(buffer.iov_len), &bytes);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileWriteBytes, bytes);
 		bytes_written += bytes;
 		if (bytes < buffer.iov_len) {
