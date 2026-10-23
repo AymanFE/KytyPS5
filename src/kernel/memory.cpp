@@ -1462,7 +1462,7 @@ static bool TryReadForDrawPrep(Graphics::DrawPrep::Recorder& recorder, uint64_t 
 	    (vaddr & PageMask) + size <= 4096u && !recorder.reads->Failed()) {
 		std::memcpy(data, recorder.direct_host + (vaddr & PageMask), static_cast<size_t>(size));
 		std::atomic_thread_fence(std::memory_order_acquire);
-		if (GuestAddressSpace::BackingMapGeneration() == recorder.direct_generation) {
+		if (GuestAddressSpace::BackingMappingTag(vaddr) == recorder.direct_generation) {
 			if (Graphics::DrawPrep::DirectReadsMode() >= 2) [[unlikely]] {
 				VerifyDirectRead(vaddr, data, size);
 			}

@@ -58,8 +58,25 @@ struct GuestBackingMappingCache {
 	};
 	std::array<Entry, 4> entries {};
 	uint32_t             next = 0;
+	// KYTY_MAP_REGION_EPOCH: direct-mapped by the 256 KiB granule of the address read (the
+	// record's tag is the epoch of that address's 64 MiB region).
+	std::array<Entry, 512> direct {};
 };
 static thread_local GuestBackingMappingCache t_backing_mapping_cache;
+
+// KYTY_MAP_REGION_EPOCH=1 (default off; chenxiao07/KytyPS5 505cbb83f): a per-thread mapping record
+// holds while its own 64 MiB region of guest addresses saw no mapping change, instead of while no
+// mapping changed anywhere (the global map generation, which every guest map and unmap moves:
+// streaming invalidated every thread's records, the draw-preparation workers' direct pages
+// included, several times a frame), and the records are 512 per thread by 256 KiB granule
+// instead of 4. Read once at start-up.
+static bool MapRegionEpochEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_MAP_REGION_EPOCH");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
 
 template <typename Regions, typename Region, typename Gap>
 static void ForEachSparseRange(const Regions& regions, uint64_t vaddr, uint64_t size,
@@ -343,21 +360,16 @@ public:
 		if (!Libs::Graphics::CleanVerdict::Enabled()) {
 			return TryReadBacking(vaddr, data, size); // the mapping cache is off
 		}
-		const auto generation = s_map_generation.load(std::memory_order_acquire);
-		for (const auto& entry: t_backing_mapping_cache.entries) {
-			if (entry.owner != this || entry.generation != generation || vaddr < entry.vaddr ||
-			    vaddr - entry.vaddr >= entry.size || size > entry.size - (vaddr - entry.vaddr)) {
-				continue;
-			}
+		uint64_t generation = 0;
+		if (const auto* entry = FindCachedMapping(vaddr, size, generation); entry != nullptr) {
 			// RangeOk held for the whole record when it was cached under m_mutex.
-			std::memcpy(data, m_backing_base + entry.backing_offset + (vaddr - entry.vaddr),
+			std::memcpy(data, m_backing_base + entry->backing_offset + (vaddr - entry->vaddr),
 			            static_cast<size_t>(size));
 			std::atomic_thread_fence(std::memory_order_acquire);
-			if (s_map_generation.load(std::memory_order_relaxed) == generation) {
+			if (MappingTag(vaddr) == generation) {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::BackingMapCacheHits);
 				return true;
 			}
-			break;
 		}
 		Profiler::CountFrameEvent(Profiler::FrameEvent::BackingMapCacheMisses);
 		auto* destination = static_cast<uint8_t*>(data);
@@ -381,22 +393,17 @@ public:
 		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		const auto generation = s_map_generation.load(std::memory_order_acquire);
-		for (const auto& entry: t_backing_mapping_cache.entries) {
-			if (entry.owner != this || entry.generation != generation || vaddr < entry.vaddr ||
-			    vaddr - entry.vaddr >= entry.size || size > entry.size - (vaddr - entry.vaddr)) {
-				continue;
-			}
+		uint64_t generation = 0;
+		if (const auto* entry = FindCachedMapping(vaddr, size, generation); entry != nullptr) {
 			// RangeOk held for the whole record when it was cached under m_mutex, and the backing
 			// view stays mapped for the store's lifetime.
-			inspect(static_cast<const uint8_t*>(m_backing_base + entry.backing_offset +
-			                                    (vaddr - entry.vaddr)));
+			inspect(static_cast<const uint8_t*>(m_backing_base + entry->backing_offset +
+			                                    (vaddr - entry->vaddr)));
 			std::atomic_thread_fence(std::memory_order_acquire);
-			if (s_map_generation.load(std::memory_order_relaxed) == generation) {
+			if (MappingTag(vaddr) == generation) {
 				*locked = false;
 				return true;
 			}
-			break;
 		}
 		*locked = true;
 		MapReadLock lock(m_mutex);
@@ -409,7 +416,7 @@ public:
 			if (!RangeOk(offset, size)) {
 				return false;
 			}
-			RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset);
+			RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset, vaddr);
 			inspect(static_cast<const uint8_t*>(m_backing_base + offset));
 			return true;
 		}
@@ -447,19 +454,25 @@ public:
 		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
 			return nullptr;
 		}
-		generation = s_map_generation.load(std::memory_order_acquire);
-		for (const auto& entry: t_backing_mapping_cache.entries) {
-			if (entry.owner != this || entry.generation != generation || vaddr < entry.vaddr ||
-			    vaddr - entry.vaddr >= entry.size || size > entry.size - (vaddr - entry.vaddr)) {
-				continue;
-			}
+		if (const auto* entry = FindCachedMapping(vaddr, size, generation); entry != nullptr) {
 			// RangeOk held for the whole record when it was cached under m_mutex.
-			return m_backing_base + entry.backing_offset + (vaddr - entry.vaddr);
+			return m_backing_base + entry->backing_offset + (vaddr - entry->vaddr);
 		}
 		return nullptr;
 	}
 	[[nodiscard]] static uint64_t MapGeneration() {
 		return s_map_generation.load(std::memory_order_relaxed);
+	}
+	// The tag a record for an access at `vaddr` is valid for (BackingAliasCached's `generation`):
+	// a reader of the alias checks it again after copying.
+	[[nodiscard]] static uint64_t MappingTag(uint64_t vaddr) {
+		if (MapRegionEpochEnabled()) {
+			const auto region = vaddr >> RegionEpochBits;
+			if (region < RegionEpochCount) {
+				return s_region_epochs[region].load(std::memory_order_acquire);
+			}
+		}
+		return s_map_generation.load(std::memory_order_acquire);
 	}
 
 	// The backing alias of [vaddr, vaddr + size) when one mapping holds the whole range, or
@@ -535,7 +548,7 @@ public:
 
 		{
 			std::lock_guard lock(m_mutex);
-			InvalidateMapHints();
+			InvalidateMapHints(vaddr, size);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
 		}
 		SetFailure(failure_reason, FailureReason::None);
@@ -639,7 +652,7 @@ public:
 				if (vaddr + size <= entry->second.vaddr + entry->second.size) {
 					old = entry->second;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-					InvalidateMapHints();
+					InvalidateMapHints(entry->second.vaddr, entry->second.size);
 					m_maps.erase(entry);
 #endif
 				}
@@ -660,7 +673,7 @@ public:
 			    UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size);
 			if (!unmapped) {
 				std::lock_guard lock(m_mutex);
-				InvalidateMapHints();
+				InvalidateMapHints(old.vaddr, old.size);
 				m_maps.emplace(old.vaddr, old);
 				return false;
 			}
@@ -713,7 +726,7 @@ public:
 			return false;
 		}
 		std::lock_guard lock(m_mutex);
-		InvalidateMapHints();
+		InvalidateMapHints(old.vaddr, old.size);
 		m_maps.emplace(old.vaddr, old);
 		return false;
 #else
@@ -790,6 +803,17 @@ private:
 
 	// Starts at 1 so zero-initialized GuestBackingMappingCache entries never match.
 	inline static std::atomic<uint64_t> s_map_generation {1};
+	// KYTY_MAP_REGION_EPOCH: a change count per 64 MiB of guest address (1 TiB), each starting at
+	// (region + 1) << 32, so no region's tag equals another's or the global generation's.
+	static constexpr uint64_t RegionEpochBits  = 26;
+	static constexpr uint64_t RegionEpochCount = uint64_t {1} << (40u - RegionEpochBits);
+	inline static std::unique_ptr<std::atomic<uint64_t>[]> s_region_epochs = [] {
+		auto epochs = std::make_unique<std::atomic<uint64_t>[]>(RegionEpochCount);
+		for (uint64_t region = 0; region < RegionEpochCount; region++) {
+			epochs[region].store((region + 1) << 32u, std::memory_order_relaxed);
+		}
+		return epochs;
+	}();
 
 	// Small reads only: the lock matters for descriptor-sized probes, and they go through a
 	// bounce buffer so a failed read never modifies the destination (as on the locked path).
@@ -801,21 +825,17 @@ private:
 		    UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		const auto generation = s_map_generation.load(std::memory_order_acquire);
-		for (const auto& entry: t_backing_mapping_cache.entries) {
-			if (entry.owner != this || entry.generation != generation || vaddr < entry.vaddr ||
-			    vaddr - entry.vaddr >= entry.size || size > entry.size - (vaddr - entry.vaddr)) {
-				continue;
-			}
+		uint64_t generation = 0;
+		if (const auto* entry = FindCachedMapping(vaddr, size, generation); entry != nullptr) {
 			// RangeOk held for the whole record when it was cached under m_mutex.
 			std::array<uint8_t, MAX_CACHED_MAPPING_READ> bounce;
 			std::memcpy(bounce.data(),
-			            m_backing_base + entry.backing_offset + (vaddr - entry.vaddr),
+			            m_backing_base + entry->backing_offset + (vaddr - entry->vaddr),
 			            static_cast<size_t>(size));
 			// Seqlock-style validation: if a map mutation started during the copy, the caller
 			// redoes the read under m_mutex so it is ordered before or after that mutation.
 			std::atomic_thread_fence(std::memory_order_acquire);
-			if (s_map_generation.load(std::memory_order_relaxed) != generation) {
+			if (MappingTag(vaddr) != generation) {
 				return false;
 			}
 			std::memcpy(data, bounce.data(), static_cast<size_t>(size));
@@ -824,14 +844,44 @@ private:
 		return false;
 	}
 
-	// Caller holds m_mutex, so the generation cannot change while it is sampled.
-	void RememberMappingUnlocked(uint64_t vaddr, uint64_t size, uint64_t backing_offset) const {
+	// This thread's record covering [vaddr, vaddr + size) whose tag is the current
+	// MappingTag(vaddr) (returned in `tag`), or nullptr.
+	const GuestBackingMappingCache::Entry* FindCachedMapping(uint64_t vaddr, uint64_t size,
+	                                                         uint64_t& tag) const {
+		tag              = MappingTag(vaddr);
+		const auto covers = [&](const GuestBackingMappingCache::Entry& entry) {
+			return entry.owner == this && entry.generation == tag && vaddr >= entry.vaddr &&
+			       vaddr - entry.vaddr < entry.size && size <= entry.size - (vaddr - entry.vaddr);
+		};
+		auto& cache = t_backing_mapping_cache;
+		if (MapRegionEpochEnabled()) {
+			const auto& entry = cache.direct[(vaddr >> 18u) % cache.direct.size()];
+			return covers(entry) ? &entry : nullptr;
+		}
+		for (const auto& entry: cache.entries) {
+			if (covers(entry)) {
+				return &entry;
+			}
+		}
+		return nullptr;
+	}
+
+	// Caller holds m_mutex, so the tags cannot change while they are sampled. `access` is the
+	// address being read (inside the mapping): with region epochs the record is valid for that
+	// address's region and kept in its granule's slot.
+	void RememberMappingUnlocked(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
+	                             uint64_t access) const {
 		if (!RangeOk(backing_offset, size)) {
 			return;
 		}
-		auto& cache = t_backing_mapping_cache;
-		cache.entries[cache.next++ % cache.entries.size()] = {
-		    this, s_map_generation.load(std::memory_order_relaxed), vaddr, size, backing_offset};
+		auto&                                 cache = t_backing_mapping_cache;
+		const GuestBackingMappingCache::Entry record {this, MappingTag(access), vaddr, size,
+		                                              backing_offset};
+		if (MapRegionEpochEnabled()) {
+			cache.direct[(access >> 18u) % cache.direct.size()] = record;
+			return;
+		}
+		cache.entries[cache.next++ % cache.entries.size()] = record;
 	}
 
 	template <typename Transfer>
@@ -872,7 +922,7 @@ private:
 					return false;
 				}
 				if (remember_mapping) {
-					RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset);
+					RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset, vaddr);
 				}
 				transfer(m_backing_base + offset, 0, static_cast<size_t>(size));
 				return true;
@@ -890,7 +940,7 @@ private:
 			}
 			if (remember_mapping && bytes == size) {
 				// One mapping covers the whole read; later reads may translate it lock-free.
-				RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset);
+				RememberMappingUnlocked(entry.vaddr, entry.size, entry.backing_offset, vaddr);
 			}
 			current += bytes;
 		}
@@ -980,6 +1030,24 @@ private:
 	void InvalidateMapHints() {
 		m_map_hints = {};
 		s_map_generation.fetch_add(1, std::memory_order_seq_cst);
+	}
+	// The same for a change of the mappings in [vaddr, vaddr + size) only (every mapping the change
+	// adds, removes or replaces lies inside it): with KYTY_MAP_REGION_EPOCH the records of other
+	// regions stay valid.
+	void InvalidateMapHints(uint64_t vaddr, uint64_t size) {
+		if (!MapRegionEpochEnabled() || size == 0 || UINT64_MAX - vaddr < size) {
+			InvalidateMapHints();
+			return;
+		}
+		m_map_hints     = {};
+		const auto last = (vaddr + size - 1) >> RegionEpochBits;
+		if (last >= RegionEpochCount) {
+			s_map_generation.fetch_add(1, std::memory_order_seq_cst);
+		}
+		for (auto region = vaddr >> RegionEpochBits; region <= last && region < RegionEpochCount;
+		     region++) {
+			s_region_epochs[region].fetch_add(1, std::memory_order_seq_cst);
+		}
 	}
 
 	[[nodiscard]] bool RangeOk(uint64_t backing_offset, uint64_t size) const {
@@ -1262,6 +1330,9 @@ public:
 		return m_backing->BackingAliasCached(vaddr, size, generation);
 	}
 	[[nodiscard]] static uint64_t BackingMapGeneration() { return GuestBackingStore::MapGeneration(); }
+	[[nodiscard]] static uint64_t BackingMappingTag(uint64_t vaddr) {
+		return GuestBackingStore::MappingTag(vaddr);
+	}
 
 	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }
 
