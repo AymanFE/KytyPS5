@@ -62,13 +62,26 @@ class Buffer;
 // host copies. Ranges without an alias (not direct memory, or spanning mappings) are copied by
 // the command processor as before.
 [[nodiscard]] bool UploadDmaHostCopyEnabled();
+// KYTY_UPLOAD_DMA_WRITE_DRAIN=1 (live, default off). The host copy above runs later than the
+// command processor's own writes of guest memory that come after the upload in the command
+// stream (DUMP_CONST_RAM, WRITE_DATA, DMA_DATA, COPY_DATA, CP-side labels: everything that calls
+// StreamCopyDefer::NoteGuestWrite). Those are ordered, not races: the draw that the upload is for
+// must not see them. When the worker is late (a loaded CP thread, KYTY_DEFER_PROTECTS=all sending
+// every small upload to it), it copied them into the earlier upload: the earlier draws read
+// "future" constants, arguments or descriptors (reproduced as a device loss on
+// big_hand_pirate_island with the worker delayed 2 ms, with or without KYTY_DEFER_PROTECTS). With
+// this switch such a write first waits until the worker has made every queued host copy that
+// overlaps it (UploadDma::DrainHostCopies). KYTY_UPLOAD_DMA_WRITE_DRAIN_LOG=1 logs the first ones.
+[[nodiscard]] bool UploadDmaWriteDrainEnabled();
 
 // A copy of host bytes into a staging buffer's mapping that the DMA worker performs before it
-// submits the transfer reading them (KYTY_UPLOAD_DMA_HOST_COPY).
+// submits the transfer reading them (KYTY_UPLOAD_DMA_HOST_COPY). `guest`: the guest address the
+// source bytes belong to (KYTY_UPLOAD_DMA_WRITE_DRAIN).
 struct UploadHostCopy {
 	uint8_t*       destination = nullptr;
 	const uint8_t* source      = nullptr;
 	uint64_t       size        = 0;
+	uint64_t       guest       = 0;
 };
 
 class UploadDma final: public SubmitDependency {
@@ -95,6 +108,16 @@ public:
 	                                            std::vector<UploadHostCopy>* host_copies = nullptr,
 	                                            PageManager::PendingProtects* protects = nullptr,
 	                                            bool allow_small = false);
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN, recording thread: before a command-processor write of guest
+	// memory [address, address + size), waits until the worker has made every queued host copy
+	// that reads those bytes. Returns true when it waited.
+	bool DrainHostCopies(uint64_t address, uint64_t size);
+	struct DrainStats {
+		uint64_t checks = 0; // writes that overlapped the queued host-copy bounds
+		uint64_t waits  = 0; // writes that overlapped a queued host copy and waited
+		uint64_t wait_ns = 0;
+	};
+	[[nodiscard]] DrainStats GetDrainStats() const noexcept { return m_drain; }
 	// Host-copy totals (tests): bytes queued by Stage and bytes the worker has copied.
 	[[nodiscard]] uint64_t HostCopyBytesQueued() const noexcept { return m_host_bytes_queued; }
 	[[nodiscard]] uint64_t HostCopyBytesDone() const noexcept {
@@ -168,6 +191,19 @@ private:
 	// only it waits; later submissions order after those copies through their own barriers.
 	uint64_t                m_stage_tick  = 0;
 	uint64_t                m_stage_value = 0;
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN: guest ranges of queued host copies (job value, [begin, end)),
+	// in staging order, and their bounds; entries the worker has copied are pruned lazily.
+	struct HostRange {
+		uint64_t value = 0;
+		uint64_t begin = 0;
+		uint64_t end   = 0;
+	};
+	std::deque<HostRange>   m_host_ranges;
+	uint64_t                m_host_lo = UINT64_MAX;
+	uint64_t                m_host_hi = 0;
+	DrainStats              m_drain;
+	// Newest job value whose host copies the worker has made.
+	std::atomic<uint64_t>   m_copied {0};
 	// Worker.
 	std::vector<Batch>      m_batches;
 	size_t                  m_next_batch = 0;

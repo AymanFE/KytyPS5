@@ -613,6 +613,7 @@ bool DirtyQueryCombinedEnabled() {
 // the stream buffer reads the guest bytes through the guest mapping instead of the backing store
 // (TryReadBacking). Its pages are CPU-dirty and not GPU-dirty, so no protection stops the read.
 BufferCache* g_defer_cache = nullptr; // the BufferCache whose stream copies are deferred
+UploadDma*   g_write_drain_dma = nullptr; // KYTY_UPLOAD_DMA_WRITE_DRAIN: the cache's upload DMA
 
 bool StreamCopyProbe() {
 	static const bool enabled = ParseEnvU64("KYTY_STREAM_COPY_PROBE", 0) != 0;
@@ -1494,6 +1495,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
 	m_range_memo_verify = m_range_memo != nullptr ? RangeMemoVerifyMode() : 0;
+	if (m_upload_dma != nullptr) {
+		g_write_drain_dma = m_upload_dma.get(); // KYTY_UPLOAD_DMA_WRITE_DRAIN
+	}
 	m_relaxed_queries = RelaxedQueriesEnabled();
 	m_bda_dirty_log   = m_bda_hot_sync && BdaDirtyLogEnabled();
 	if (m_bda_dirty_log) {
@@ -1570,6 +1574,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 BufferCache::~BufferCache() {
 	if (g_defer_cache == this) {
 		g_defer_cache = nullptr;
+	}
+	if (m_upload_dma != nullptr && g_write_drain_dma == m_upload_dma.get()) {
+		g_write_drain_dma = nullptr;
 	}
 	if (m_upload_dma != nullptr) {
 		// The scheduler has drained by now; no later submission may wait on the upload DMA.
@@ -3499,7 +3506,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 			}
 			if (alias != nullptr) {
 				deferred->push_back({mapped + copy.srcOffset, static_cast<const uint8_t*>(alias),
-				                     copy.size});
+				                     copy.size, buffer.CpuAddress() + copy.dstOffset});
 			} else {
 				std::memcpy(mapped + copy.srcOffset, source_of(index, copy), copy.size);
 			}
@@ -4138,6 +4145,11 @@ bool BufferCache::TryDeferStreamCopy(uint8_t* mapped, uint64_t vaddr, uint64_t s
 }
 
 void StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size) {
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN (uploadDma.h): queued host copies of these bytes are made first.
+	if (auto* dma = g_write_drain_dma; dma != nullptr && size != 0 && UploadDmaWriteDrainEnabled() &&
+	                                   GuestGpu::IsGpuThread()) {
+		(void)dma->DrainHostCopies(address, size);
+	}
 	auto* cache = g_defer_cache;
 	if (cache == nullptr || cache->m_deferred.empty() || size == 0 || !GuestGpu::IsGpuThread()) {
 		return;
