@@ -2,6 +2,7 @@
 #include "common/ramStats.h"
 
 #include "common/hangWatchdog.h"
+#include "common/spinGate.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 
 #include <algorithm>
@@ -787,8 +788,9 @@ bool Ring::WaitPublished(const std::atomic<bool>& stop, const WaitPolicy& policy
 	                         m_published_cache);
 	const auto start = NowNs();
 	stats.spins++;
-	const bool spun =
-	    Spin(policy.spin_ns, [&] { return available() || stop.load(std::memory_order_acquire); });
+	// KYTY_SPIN_GATE: the consumer's idle spin only while the PC keeps CPUs idle.
+	const bool spun = Spin(Common::SpinGate::SpinAllowed() ? policy.spin_ns : 0,
+	                       [&] { return available() || stop.load(std::memory_order_acquire); });
 	if (!spun) {
 		stats.blocks++;
 		for (;;) {
