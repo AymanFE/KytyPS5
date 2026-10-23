@@ -4991,21 +4991,13 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 	return OK;
 }
 
-static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
-	VirtualRanges::Range old_range {};
-	if (!g_virtual_ranges->Query(vaddr, 0, &old_range)) {
-		return KERNEL_ERROR_EACCES;
-	}
-	const auto chunk_len = std::min<uint64_t>(len, old_range.size - (vaddr - old_range.start));
+// One virtual range's part of a decommit: [vaddr, vaddr + len) lies inside `old_range`.
+static int DecommitMemoryPoolPart(const VirtualRanges::Range& old_range, uint64_t vaddr, size_t len) {
 	if (old_range.type == VirtualRangeType::PoolReserved) {
-		return chunk_len < len ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : OK;
+		return OK;
 	}
 	if (old_range.type != VirtualRangeType::Pooled) {
 		return KERNEL_ERROR_EACCES;
-	}
-	if (chunk_len < len) {
-		const int ret = DecommitMemoryPoolRange(vaddr, chunk_len);
-		return ret == OK ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : ret;
 	}
 
 	std::vector<PooledMemory::Mapping> mappings;
@@ -5021,7 +5013,7 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	if (!UnmapPooledBackingTransactional(mappings, mode)) {
 		EXIT("pooled-memory backing transaction failed after GPU unmap: addr=0x%016" PRIx64
 		     " size=0x%016" PRIx64 "\n",
-		     vaddr, len);
+		     vaddr, static_cast<uint64_t>(len));
 	}
 
 	GpuAccessMode gpu_mode = GpuAccessMode::NoAccess;
@@ -5037,6 +5029,29 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	}
 
 	MemoryPoolSubtractCommitted(len);
+	return OK;
+}
+
+// The virtual ranges a decommit spans, one after the other in a loop (it recursed a call level per
+// range: a pool range of many committed pieces could use up a job fiber's stack, as
+// chenxiao07/KytyPS5 acda789e6 found for munmap; a zero-length part recursed forever).
+static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
+	while (len != 0) {
+		VirtualRanges::Range old_range {};
+		if (!g_virtual_ranges->Query(vaddr, 0, &old_range)) {
+			return KERNEL_ERROR_EACCES;
+		}
+		const auto chunk_len = std::min<uint64_t>(len, old_range.size - (vaddr - old_range.start));
+		if (chunk_len == 0) {
+			return KERNEL_ERROR_EINVAL;
+		}
+		const int ret = DecommitMemoryPoolPart(old_range, vaddr, static_cast<size_t>(chunk_len));
+		if (ret != OK) {
+			return ret;
+		}
+		vaddr += chunk_len;
+		len -= static_cast<size_t>(chunk_len);
+	}
 	return OK;
 }
 
