@@ -481,6 +481,9 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 			     m_idle_frames);
 		}
 	}
+	if (const auto* keep = std::getenv("KYTY_VRAM_IDLE_KEEP_POOLS_MB"); keep != nullptr) {
+		m_idle_keep_pool_bytes = std::strtoull(keep, nullptr, 10) << 20u;
+	}
 	if (const auto* pressure = std::getenv("KYTY_VRAM_PRESSURE_FRAMES"); pressure != nullptr) {
 		m_pressure_frames = std::strtoull(pressure, nullptr, 10);
 		if (m_pressure_frames != 0) {
@@ -6612,8 +6615,26 @@ void TextureCache::NoteFrameTick(uint64_t frame, uint64_t tick) {
 	}
 }
 
+// The game's texture pools (one-level arrays it samples through views of moving layer ranges) can
+// go unused for minutes while the camera is elsewhere; retired by age, the next view rebuilds the
+// whole pool from guest memory (chenxiao07/KytyPS5 928366303: 1.3-2 GB uploads, 150-460 ms
+// frames, 2-3 times a map in Demon's Souls). Kept only with plenty of video memory: pressure and
+// budget collection still free them. Adapted from chenxiao07/KytyPS5 928366303 (no scene tags).
+bool TextureCache::KeptIdlePool(const Image& image) const {
+	if (m_idle_keep_pool_bytes == 0 || image.info.resources.levels != 1 ||
+	    image.info.resources.layers <= 1 || image.AccountedSize() < m_idle_keep_pool_bytes ||
+	    image.usage.storage || image.usage.render_target || image.usage.depth_target) {
+		return false;
+	}
+	static const bool big_budget = [this] {
+		return m_graphics.CanReportMemoryUsage() &&
+		       m_graphics.GetTotalMemoryBudget() >= (uint64_t {12} << 30u);
+	}();
+	return big_budget;
+}
+
 uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size_t max_count,
-                                          uint64_t enough) {
+                                          uint64_t enough, bool idle_pass) {
 	if (frame <= min_age) {
 		return 0;
 	}
@@ -6632,7 +6653,8 @@ uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size
 	// LRU head) are passed over, not counted as deletions.
 	m_lru_cache.ForEachItemBelow(limit_tick, [&](ImageId id) {
 		const auto* image = m_slot_images.try_get(id);
-		if (image != nullptr && IdleRetirable(*image, frame, min_age)) {
+		if (image != nullptr && IdleRetirable(*image, frame, min_age) &&
+		    !(idle_pass && KeptIdlePool(*image))) {
 			candidates.push_back(id);
 		}
 		return ++scanned >= 16384 || candidates.size() >= max_count;
@@ -6648,6 +6670,18 @@ uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size
 			continue;
 		}
 		freed += image->AccountedSize();
+		// (Large retirements logged, switch on or off: a log shows whether a game's pools go.)
+		if (idle_pass && image->info.resources.layers > 1 &&
+		    image->AccountedSize() >= (uint64_t {128} << 20u)) {
+			static std::atomic<uint32_t> reports {0};
+			if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+				std::printf("TextureCache: idle retirement of a %ux%u x%u-layer image (%" PRIu64
+				            " MiB, %u levels) at 0x%" PRIx64 "\n",
+				            image->info.extent.width, image->info.extent.height,
+				            image->info.resources.layers, image->AccountedSize() >> 20u,
+				            image->info.resources.levels, image->info.data.address);
+			}
+		}
 		FreeImage(id, HangTrace::ImageFreeReason::GarbageCollect);
 		++m_idle_freed;
 	}
@@ -6666,7 +6700,7 @@ void TextureCache::RunGarbageCollector() {
 	NoteFrameTick(frame, tick);
 	if (m_idle_frames != 0 && frame >= m_idle_next_frame) {
 		m_idle_next_frame = frame + 32;
-		(void)RetireUnusedImages(frame, m_idle_frames, 512, UINT64_MAX);
+		(void)RetireUnusedImages(frame, m_idle_frames, 512, UINT64_MAX, true);
 	}
 	m_tiler.TrimScratchPool();
 	if ((tick & 63u) == 0 && Profiler::DetailedEnabled() && tracy::ProfilerAvailable()) {
