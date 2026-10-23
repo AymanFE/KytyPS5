@@ -153,7 +153,12 @@ void FaultManager::ProcessFaultBuffer() {
 		m_download_buffer.Invalidate(offset, PageFaultAreaSize);
 		RangeSet    fault_ranges;
 		const auto* faults = std::bit_cast<const uint64_t*>(mapped);
-		const auto  count  = static_cast<uint32_t>(faults[0]);
+		// The parser counts every faulting page but stores at most MaxPageFaults - 1 records
+		// (entries 1..MaxPageFaults - 1): a larger count would read past this area into another
+		// batch's records or past the download buffer (chenxiao07/KytyPS5 d645c916b). Pages left
+		// out fault again at their next read.
+		const auto count = static_cast<uint32_t>(
+		    std::min<uint64_t>(static_cast<uint32_t>(faults[0]), MaxPageFaults - 1));
 		for (uint32_t index = 1; index <= count; ++index) {
 			fault_ranges.Add(faults[index], BufferCache::CACHING_PAGESIZE);
 			LOGF("Accessed non-GPU cached memory at 0x%016" PRIx64 "\n", faults[index]);
