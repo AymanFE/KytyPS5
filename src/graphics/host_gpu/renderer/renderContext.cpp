@@ -264,6 +264,17 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	return true;
 }
 
+bool RenderContext::PrepareHostOverwrite(uint64_t vaddr, uint64_t size) {
+	if (!IsMapped(vaddr, size)) {
+		return false;
+	}
+	const auto watched = m_page_manager.CountWatchedPages(vaddr, size);
+	if (watched.write == 0 && watched.access == 0) {
+		return false;
+	}
+	return InvalidateMemory(vaddr, size);
+}
+
 bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		return false;
