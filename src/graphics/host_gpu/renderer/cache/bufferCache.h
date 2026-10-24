@@ -242,6 +242,10 @@ public:
 	// Image content serial (Image::NextContentSerial) taken when the latest unbounded writer was
 	// bound: an image whose ContentSerial is larger was written after it.
 	[[nodiscard]] uint64_t UnboundedWriteSerial() const noexcept { return m_unbounded_write_serial; }
+	// Buffers unregistered so far (a join retires the buffers it absorbs, an unmap or the
+	// collector deletes them): a draw or dispatch whose resolved bindings were made before the
+	// count moved may hold a retired buffer (KYTY_REBIND_AFTER_JOIN, RenderExecutor).
+	[[nodiscard]] uint64_t UnregisterEpoch() const noexcept { return m_unregister_epoch; }
 	// Publications can outlive cache ownership. Registration is on the GPU thread; completion
 	// is on the priority worker, and these queries never wait for GPU work or backing writes.
 	[[nodiscard]] uint64_t BeginBackingPublication(std::span<const GuestRange> ranges,
@@ -719,6 +723,7 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	uint64_t                                          m_unregister_epoch = 0;
 	struct KnownFillRange {
 		uint64_t address = 0;
 		uint64_t size    = 0;

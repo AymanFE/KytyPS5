@@ -140,6 +140,10 @@ public:
 
 	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// A host write of the whole of [vaddr, vaddr + size) is about to happen (an APR file read):
+	// when resource tracking watches any of its pages, one invalidation of the range (as the
+	// kernel's file reads make) instead of a write fault per page. False: nothing watched.
+	bool PrepareHostOverwrite(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	// GPU preparation only, outside texture-cache/tracker locks. Does not download dirty images.
 	[[nodiscard]] bool SynchronizeGpuBackingForRead(uint64_t vaddr, uint64_t size);

@@ -1509,7 +1509,7 @@ static bool TryReadForDrawPrep(Graphics::DrawPrep::Recorder& recorder, uint64_t 
 	    (vaddr & PageMask) + size <= 4096u && !recorder.reads->Failed()) {
 		std::memcpy(data, recorder.direct_host + (vaddr & PageMask), static_cast<size_t>(size));
 		std::atomic_thread_fence(std::memory_order_acquire);
-		if (GuestAddressSpace::BackingMapGeneration() == recorder.direct_generation) {
+		if (GuestAddressSpace::BackingMappingTag(vaddr) == recorder.direct_generation) {
 			if (Graphics::DrawPrep::DirectReadsMode() >= 2) [[unlikely]] {
 				VerifyDirectRead(vaddr, data, size);
 			}
@@ -1732,6 +1732,13 @@ void InvalidateMemory(uint64_t vaddr, uint64_t size) {
 		return;
 	}
 	(void)GetGpuResources().InvalidateMemory(vaddr, size);
+}
+
+bool PrepareHostOverwrite(uint64_t vaddr, uint64_t size) {
+	if (size == 0 || g_gpu_resources == nullptr) {
+		return false;
+	}
+	return g_gpu_resources->PrepareHostOverwrite(vaddr, size);
 }
 
 void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
@@ -5041,21 +5048,13 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 	return OK;
 }
 
-static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
-	VirtualRanges::Range old_range {};
-	if (!g_virtual_ranges->Query(vaddr, 0, &old_range)) {
-		return KERNEL_ERROR_EACCES;
-	}
-	const auto chunk_len = std::min<uint64_t>(len, old_range.size - (vaddr - old_range.start));
+// One virtual range's part of a decommit: [vaddr, vaddr + len) lies inside `old_range`.
+static int DecommitMemoryPoolPart(const VirtualRanges::Range& old_range, uint64_t vaddr, size_t len) {
 	if (old_range.type == VirtualRangeType::PoolReserved) {
-		return chunk_len < len ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : OK;
+		return OK;
 	}
 	if (old_range.type != VirtualRangeType::Pooled) {
 		return KERNEL_ERROR_EACCES;
-	}
-	if (chunk_len < len) {
-		const int ret = DecommitMemoryPoolRange(vaddr, chunk_len);
-		return ret == OK ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : ret;
 	}
 
 	std::vector<PooledMemory::Mapping> mappings;
@@ -5071,7 +5070,7 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	if (!UnmapPooledBackingTransactional(mappings, mode)) {
 		EXIT("pooled-memory backing transaction failed after GPU unmap: addr=0x%016" PRIx64
 		     " size=0x%016" PRIx64 "\n",
-		     vaddr, len);
+		     vaddr, static_cast<uint64_t>(len));
 	}
 
 	GpuAccessMode gpu_mode = GpuAccessMode::NoAccess;
@@ -5087,6 +5086,29 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	}
 
 	MemoryPoolSubtractCommitted(len);
+	return OK;
+}
+
+// The virtual ranges a decommit spans, one after the other in a loop (it recursed a call level per
+// range: a pool range of many committed pieces could use up a job fiber's stack, as
+// chenxiao07/KytyPS5 acda789e6 found for munmap; a zero-length part recursed forever).
+static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
+	while (len != 0) {
+		VirtualRanges::Range old_range {};
+		if (!g_virtual_ranges->Query(vaddr, 0, &old_range)) {
+			return KERNEL_ERROR_EACCES;
+		}
+		const auto chunk_len = std::min<uint64_t>(len, old_range.size - (vaddr - old_range.start));
+		if (chunk_len == 0) {
+			return KERNEL_ERROR_EINVAL;
+		}
+		const int ret = DecommitMemoryPoolPart(old_range, vaddr, static_cast<size_t>(chunk_len));
+		if (ret != OK) {
+			return ret;
+		}
+		vaddr += chunk_len;
+		len -= static_cast<size_t>(chunk_len);
+	}
 	return OK;
 }
 

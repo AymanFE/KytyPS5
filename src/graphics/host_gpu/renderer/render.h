@@ -1042,6 +1042,10 @@ struct GraphicsDynamicStateShadow {
 	std::array<float, 2> depth_bounds {};
 };
 
+// KYTY_REBIND_AFTER_JOIN (descriptors.cpp).
+[[nodiscard]] bool RebindAfterJoinEnabled();
+void               NoteRebindAfterJoin(const char* kind, const char* name);
+
 class RenderExecutor {
 public:
 	explicit RenderExecutor(RenderContext& context);
@@ -1489,6 +1493,7 @@ private:
 	bool                         m_run_keepable  = false;
 	bool          m_run_prev_valid     = false; // m_run.valid when the committed draw began
 	bool          m_run_active         = false; // the draw takes the delta path
+	uint64_t      m_rebind_epoch       = 0;     // KYTY_REBIND_AFTER_JOIN: UnregisterEpoch at resolution
 	bool          m_run_verify         = false; // verify mode: the draw would have continued
 	uint64_t      m_run_key            = 0;     // the committed draw's structure key (the engine)
 	uint64_t      m_run_targets_key    = 0;     // and its registers' part (KYTY_DRAW_RUN_TARGETS)

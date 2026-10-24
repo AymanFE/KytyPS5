@@ -337,10 +337,48 @@ void GuestGpu::ProcessCommands() {
 	}
 }
 
+// KYTY_SYNC_COMMAND_SPIN_US (default 0: sleep at once, as before; live): GuestGpu::SendCommandSync.
+static Live::Switch g_sync_command_spin_us("KYTY_SYNC_COMMAND_SPIN_US", [](const char* value) -> int64_t {
+	const auto parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 0ul;
+	return static_cast<int64_t>(std::min(parsed, 10000ul));
+});
+
 void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!command);
 	if (IsGpuThread()) {
 		command();
+		return;
+	}
+	const auto spin_us = static_cast<uint64_t>(g_sync_command_spin_us.Get());
+	if (spin_us != 0) {
+		// KYTY_SYNC_COMMAND_SPIN_US: the caller spins that long (about what such a command waits
+		// for its packet boundary and runs) before it sleeps, and the GPU thread wakes it only when
+		// it sleeps: a guest readback's begin was a sleep, then a wake-up system call on the GPU
+		// thread (chenxiao07/KytyPS5 59aa6dc79). States: 0 running, 1 done, 2 the caller sleeps.
+		std::atomic<uint32_t> state {0};
+		SendCommand([operation = std::move(command), &state]() mutable {
+			operation();
+			if (state.exchange(1, std::memory_order_acq_rel) == 2) {
+				// WakeByAddress only names the address: harmless if the caller already returned.
+				state.notify_one();
+			}
+		});
+		HangWatchdog::Scope wait("cp-service-command", reinterpret_cast<uint64_t>(this),
+		                         reinterpret_cast<uint64_t>(&state));
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
+		uint32_t   spins    = 0;
+		while (state.load(std::memory_order_acquire) != 1) {
+			if ((++spins & 63u) == 0 && std::chrono::steady_clock::now() >= deadline) {
+				uint32_t expected = 0;
+				if (state.compare_exchange_strong(expected, 2, std::memory_order_acq_rel)) {
+					while (state.load(std::memory_order_acquire) == 2) {
+						state.wait(2, std::memory_order_acquire);
+					}
+				}
+				break;
+			}
+			_mm_pause();
+		}
 		return;
 	}
 	std::binary_semaphore done {0};
