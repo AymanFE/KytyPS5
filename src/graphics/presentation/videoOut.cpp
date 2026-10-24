@@ -866,7 +866,7 @@ void VideoOutDriver::Impl::VblankEnd() {
 // rate exact (what games pacing from vblank counts rely on) but bunch guest flips together. In
 // PresentMode::Immediate the switch also presents ready flips between vblanks (polling every
 // <= 500 us) instead of only at a vblank. The timeline restarts when the switch turns on or the
-// refresh rate changes. Independent of KYTY_PRESENT_UNLOCKED, which only changes FlipQueue::Flip.
+// refresh rate changes. Independent of KYTY_PRESENT_PORT_UNLOCKED, which only changes FlipQueue::Flip.
 static Live::Switch g_present_abs_vblank("KYTY_PRESENT_ABS_VBLANK", Live::ParseDefaultOff);
 
 void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
@@ -1333,8 +1333,9 @@ bool FlipQueue::IsPending(VideoOutConfig& cfg, int index) {
 	       std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
 }
 
-// KYTY_PRESENT_UNLOCKED (live switch, default off): see FlipQueue::Flip.
-static Live::Switch g_present_unlocked("KYTY_PRESENT_UNLOCKED", Live::ParseDefaultOff);
+// KYTY_PRESENT_PORT_UNLOCKED (live switch, default off): see FlipQueue::Flip. (Named apart from the swapchain's
+// KYTY_PRESENT_UNLOCKED, which releases the renderer's lock while presenting.)
+static Live::Switch g_present_unlocked("KYTY_PRESENT_PORT_UNLOCKED", Live::ParseDefaultOff);
 
 bool FlipQueue::Flip(uint32_t micros) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
@@ -1373,7 +1374,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_mutex.Unlock();
 
 	// Lock each port in bus order, then present and complete the whole group at one Vblank.
-	// KYTY_PRESENT_UNLOCKED=1 (default off): present without the port locks (the frames belong to
+	// KYTY_PRESENT_PORT_UNLOCKED=1 (default off): present without the port locks (the frames belong to
 	// the presenter, and a GPU flip of the command processor waits for a port lock while a present
 	// can take milliseconds), then lock the ports again to complete the group. A port closed
 	// meanwhile keeps its requests for Cancel, which waits for this flip.
