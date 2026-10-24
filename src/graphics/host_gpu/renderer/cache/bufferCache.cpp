@@ -4144,12 +4144,26 @@ bool BufferCache::TryDeferStreamCopy(uint8_t* mapped, uint64_t vaddr, uint64_t s
 	return true;
 }
 
-void StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size) {
-	// KYTY_UPLOAD_DMA_WRITE_DRAIN (uploadDma.h): queued host copies of these bytes are made first.
+void StreamCopyDefer::NoteGpuOnlyWrite(uint64_t address, uint64_t size) {
 	if (auto* dma = g_write_drain_dma; dma != nullptr && size != 0 && UploadDmaWriteDrainEnabled() &&
 	                                   GuestGpu::IsGpuThread()) {
-		(void)dma->DrainHostCopies(address, size);
+		(void)dma->DrainHostCopies(address, size, false);
 	}
+	NoteGuestWriteStream(address, size);
+}
+
+void StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size) {
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN (uploadDma.h): the guest may observe this write (a label) and
+	// then rewrite memory an earlier upload still has to read, so every queued host copy is made
+	// first.
+	if (auto* dma = g_write_drain_dma; dma != nullptr && size != 0 && UploadDmaWriteDrainEnabled() &&
+	                                   GuestGpu::IsGpuThread()) {
+		(void)dma->DrainHostCopies(address, size, true);
+	}
+	NoteGuestWriteStream(address, size);
+}
+
+void StreamCopyDefer::NoteGuestWriteStream(uint64_t address, uint64_t size) {
 	auto* cache = g_defer_cache;
 	if (cache == nullptr || cache->m_deferred.empty() || size == 0 || !GuestGpu::IsGpuThread()) {
 		return;
