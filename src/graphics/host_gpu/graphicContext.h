@@ -47,6 +47,10 @@ struct GraphicContext;
 RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint);
 [[nodiscard]] bool DeviceFaultDiagnosticsEnabled();
 void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick = 0, bool queue_locked = false);
+// A thread about to exit on a device loss: lets a device-loss report another thread is writing
+// (the VK_EXT_device_fault vendor dump, _device_fault.nv-gpudmp) finish first. Waits up to
+// `start_ms` for one to begin and then up to 10 s for it to end.
+void WaitForDeviceLossDiagnostics(uint32_t start_ms = 500);
 // Breadcrumb ring access (GpuBreadcrumbs): records and returns the sequence number; looks one up
 // (false once it left the bounded history); the newest sequence; an operation's name.
 [[nodiscard]] uint64_t RecordDiagnosticSequence(const DiagnosticCheckpoint& checkpoint);

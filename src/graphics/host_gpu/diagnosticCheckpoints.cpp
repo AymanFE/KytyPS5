@@ -9,11 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -26,6 +28,7 @@ std::array<DiagnosticCheckpoint, CHECKPOINT_RING_SIZE> g_checkpoints {};
 uint64_t g_checkpoint_sequence = 0;
 std::mutex g_checkpoint_mutex;
 std::atomic_flag g_dumping = ATOMIC_FLAG_INIT;
+std::atomic<bool> g_dump_done {false};
 
 const char* OpName(uint32_t op) {
 	switch (op) {
@@ -142,6 +145,7 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 	if (!binary.empty()) {
 		if (auto* file = std::fopen("_device_fault.nv-gpudmp", "wb"); file != nullptr) {
 			std::fwrite(binary.data(), 1, std::min<size_t>(binary.size(), counts.vendorBinarySize), file);
+			std::fflush(file);
 			std::fclose(file);
 			std::printf("  vendor binary written to _device_fault.nv-gpudmp\n");
 		}
@@ -169,11 +173,34 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 	std::fflush(stdout);
 }
 
+void WaitForDeviceLossDiagnostics(uint32_t start_ms) {
+	using Clock = std::chrono::steady_clock;
+	const auto start = Clock::now();
+	while (!g_dumping.test(std::memory_order_acquire)) {
+		if (Clock::now() - start > std::chrono::milliseconds(start_ms)) {
+			return; // nobody is reporting
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	const auto begun = Clock::now();
+	while (!g_dump_done.load(std::memory_order_acquire) &&
+	       Clock::now() - begun < std::chrono::seconds(10)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+}
+
 void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool queue_locked) {
 	HangWatchdog::Scope diagnostics(
 	    "device-loss-diagnostics",
 	    reinterpret_cast<uint64_t>(static_cast<VkDevice>(graphics.device)), tick);
 	if (g_dumping.test_and_set(std::memory_order_acquire)) return;
+	// Exiting threads wait for this (WaitForDeviceLossDiagnostics) so the report is complete.
+	struct Done {
+		~Done() {
+			std::fflush(stdout);
+			g_dump_done.store(true, std::memory_order_release);
+		}
+	} done;
 	std::printf("--- Device loss: submission/wait tick=%" PRIu64 ", KYTY_DEVICE_FAULT_DIAGNOSTICS=%d ---\n",
 	            tick, DeviceFaultDiagnosticsEnabled());
 	LOGF("--- Device loss: submission/wait tick=%" PRIu64 " ---\n", tick);

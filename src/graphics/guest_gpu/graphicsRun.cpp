@@ -1036,7 +1036,7 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 }
 
 void CommandProcessor::ExecDumpConstRam(const CpSeq::DumpConstRamOp& op, const uint32_t* src) {
-	StreamCopyDefer::NoteGuestWrite(op.dst, uint64_t {op.dw_num} * 4u);
+	StreamCopyDefer::NoteGpuOnlyWrite(op.dst, uint64_t {op.dw_num} * 4u);
 	memcpy(reinterpret_cast<uint32_t*>(op.dst), src, static_cast<size_t>(op.dw_num) * 4);
 	NoteCpWrite(op.dst, uint64_t {op.dw_num} * 4u);
 }
@@ -1333,7 +1333,7 @@ void CommandProcessor::ExecReferenceClock(const CpSeq::ReferenceClockOp& op) {
 		     num_bytes);
 	}
 	const auto value = GuestGpuTimestamp();
-	StreamCopyDefer::NoteGuestWrite(dst_address, num_bytes);
+	StreamCopyDefer::NoteGpuOnlyWrite(dst_address, num_bytes);
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	NoteCpWrite(dst_address, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
@@ -3379,7 +3379,7 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    // KYTY_LABEL_MODE=split: a later CP write to the label (the CP passed a wait
 				    // on it at record time) stays; hardware would have written the label first.
 				    if (!gpu.DeferredLabelSuperseded(address, tick)) {
-					    StreamCopyDefer::NoteGuestWrite(address, size);
+					    StreamCopyDefer::NoteGpuOnlyWrite(address, size); // after its tick completed
 					    std::memcpy(reinterpret_cast<void*>(address), &written, size);
 				    }
 			    }
@@ -3566,7 +3566,7 @@ bool CommandProcessor::TryDeferGdsRead(uint32_t* dst, uint32_t dw_offset, uint32
 		    auto write = [renderer, &gpu, bytes = std::move(bytes), address, tick, interrupt,
 		                  event_id, interrupt_context_id](bool on_gpu_thread) {
 			    if (on_gpu_thread) {
-				    StreamCopyDefer::NoteGuestWrite(address, bytes.size());
+				    StreamCopyDefer::NoteGpuOnlyWrite(address, bytes.size()); // after its tick completed
 				    std::memcpy(reinterpret_cast<void*>(address), bytes.data(), bytes.size());
 			    } else {
 				    (void)LibKernel::Memory::TryWriteBacking(address, bytes.data(), bytes.size());
@@ -4095,7 +4095,7 @@ void CommandProcessor::ExecEventWrite(const CpSeq::EventWriteOp& op) {
 			constexpr uint64_t counter_mask = ready_bit - 1u;
 			auto*              results      = reinterpret_cast<volatile uint64_t*>(event_address);
 			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
-			StreamCopyDefer::NoteGuestWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
+			StreamCopyDefer::NoteGpuOnlyWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}

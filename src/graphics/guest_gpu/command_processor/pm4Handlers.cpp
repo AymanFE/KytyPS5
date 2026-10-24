@@ -2801,7 +2801,7 @@ void CommandProcessor::ExecLodStats(const CpSeq::LodStatsOp& op) {
 	if (lod_mode == 4) {
 		ReportLodStats(reinterpret_cast<uint64_t>(dst), buffer_size, body[3]);
 	} else if (dst != nullptr && buffer_size != 0 && lod_mode != 2) {
-		StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), buffer_size);
+		StreamCopyDefer::NoteGpuOnlyWrite(reinterpret_cast<uint64_t>(dst), buffer_size);
 		memset(dst, lod_mode == 3 ? 0xff : 0, buffer_size);
 		if ((lod_mode == 0 || lod_mode == 3) && buffer_size >= sizeof(uint32_t)) {
 			auto* label = static_cast<uint32_t*>(dst);

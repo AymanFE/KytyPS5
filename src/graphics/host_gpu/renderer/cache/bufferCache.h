@@ -51,6 +51,15 @@ namespace StreamCopyDefer {
 [[nodiscard]] bool Enabled();
 // GPU thread: a command-processor write of guest memory [address, address + size).
 void NoteGuestWrite(uint64_t address, uint64_t size);
+// The same for a CP write that cannot tell the guest that earlier GPU work is done before it is:
+// the constant engine's DUMP_CONST_RAM, label and result writes made after their tick completed
+// (that tick's submission waited for every host copy staged in or before it), timestamps, LOD
+// stats, synthetic occlusion results. KYTY_UPLOAD_DMA_WRITE_DRAIN only orders it after the queued
+// host copies that read the same bytes. NoteGuestWrite (labels written at CP time, WRITE_DATA,
+// flip labels) makes every queued host copy first.
+void NoteGpuOnlyWrite(uint64_t address, uint64_t size);
+// The stream-copy part both share (internal).
+void NoteGuestWriteStream(uint64_t address, uint64_t size);
 } // namespace StreamCopyDefer
 
 // KYTY_BDA_WRITES=1 (or =verify): shaders store and do atomics through V#s they compute, through
@@ -902,7 +911,7 @@ private:
 	};
 	[[nodiscard]] bool TryDeferStreamCopy(uint8_t* mapped, uint64_t vaddr, uint64_t size);
 	void               PruneDeferredCopies(const CommandRecorder& recorder);
-	friend void        StreamCopyDefer::NoteGuestWrite(uint64_t address, uint64_t size);
+	friend void        StreamCopyDefer::NoteGuestWriteStream(uint64_t address, uint64_t size);
 	std::vector<DeferredCopy> m_deferred;
 	size_t                    m_deferred_head = 0;
 	uint64_t                  m_deferred_lo   = UINT64_MAX;
