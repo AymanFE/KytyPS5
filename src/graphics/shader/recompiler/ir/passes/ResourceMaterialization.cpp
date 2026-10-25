@@ -863,14 +863,74 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 				exemplar = resource;
 			}
 		}
-		if (resource_count < 2u || exemplar == ImageResource::NoIndirectImage) {
-			return SpecializationFail("indirect image specialization has no typed candidate");
-		}
-		const auto& image_class = specialization.images[exemplar];
 		const auto is_2d = [](Decoder::ImageDimension dimension) {
 			return dimension == Decoder::ImageDimension::Dim2D ||
 			       dimension == Decoder::ImageDimension::Dim2DArray;
 		};
+		// KYTY_INDIRECT_TABLE_IMAGES: a bindless table holds descriptors of every kind, and the
+		// shader can only use those its instruction can read. The exemplar is the most common
+		// class among the non-null candidates of the instruction's dimension; the other
+		// candidates become null descriptors.
+		if (const auto* root_source = Source(program, program.info.images[root_index].source);
+		    exemplar != ImageResource::NoIndirectImage && root_source != nullptr &&
+		    root_source->indirect_descriptor.has_value()) {
+			const auto bound = root_source->indirect_descriptor->key_count.Resolve();
+			if (bound.IsImmediate() && bound.GetType() == Type::U32 &&
+			    bound.U32() == DescriptorSource::IndirectDescriptor::TableBoundedKeys) {
+				const auto wanted = program.info.images[root_index].dimension;
+				const auto fits   = [&](const auto& image) {
+					return wanted == Decoder::ImageDimension::Unknown || image.dimension == wanted ||
+					       (is_2d(image.dimension) && is_2d(wanted));
+				};
+				const auto same_class = [&](const auto& a, const auto& b) {
+					return a.numeric_class == b.numeric_class &&
+					       (a.dimension == b.dimension || (is_2d(a.dimension) && is_2d(b.dimension))) &&
+					       a.cube == b.cube && a.mip_count == b.mip_count &&
+					       a.conversion_format == b.conversion_format &&
+					       a.shader_swizzle == b.shader_swizzle;
+				};
+				uint32_t best       = ImageResource::NoIndirectImage;
+				uint32_t best_count = 0;
+				for (uint32_t c = 0; c < specialization.images.size(); c++) {
+					const auto& image = specialization.images[c];
+					if (image.indirect_root != root_index || NullImageDescriptor(snapshot.images[c]) ||
+					    !fits(image)) {
+						continue;
+					}
+					uint32_t count = 0;
+					for (uint32_t d = 0; d < specialization.images.size(); d++) {
+						count += specialization.images[d].indirect_root == root_index &&
+						         !NullImageDescriptor(snapshot.images[d]) &&
+						         same_class(specialization.images[d], image);
+					}
+					if (count > best_count) {
+						best       = c;
+						best_count = count;
+					}
+				}
+				exemplar = best;
+				uint32_t nulled = 0;
+				for (uint32_t c = 0; c < specialization.images.size() && best != ImageResource::NoIndirectImage; c++) {
+					if (specialization.images[c].indirect_root == root_index &&
+					    !NullImageDescriptor(snapshot.images[c]) &&
+					    !same_class(specialization.images[c], specialization.images[best])) {
+						snapshot.images[c].dwords.fill(0);
+						nulled++;
+					}
+				}
+				static std::atomic<uint32_t> reported {0};
+				if (nulled != 0 && reported.fetch_add(1, std::memory_order_relaxed) < 16u) {
+					std::printf("KYTY_INDIRECT_TABLE_IMAGES: shader 0x%016llx pc 0x%08x: %u table "
+					            "candidates of another kind than the instruction's are null\n",
+					            static_cast<unsigned long long>(program.shader_hash),
+					            program.info.images[root_index].first_use_pc, nulled);
+				}
+			}
+		}
+		if (resource_count < 2u || exemplar == ImageResource::NoIndirectImage) {
+			return SpecializationFail("indirect image specialization has no typed candidate");
+		}
+		const auto& image_class = specialization.images[exemplar];
 		for (uint32_t candidate = 0; candidate < specialization.images.size(); candidate++) {
 			auto& image = specialization.images[candidate];
 			if (image.indirect_root != root_index) {
