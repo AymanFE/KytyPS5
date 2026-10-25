@@ -1977,6 +1977,9 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 		execution.m_stream_id    = ++m_next_stream_id;
 		execution.m_packets      = 0;
 		execution.m_packets_hash = 0;
+		if (CpStreamDiag() && m_front_mode != FrontMode::Prefetch) {
+			CpStreamDiagCopy(&execution, commands);
+		}
 		if (m_front_mode == FrontMode::Inline && CpSeq::VerifyMode() != 0) {
 			if (m_verifier == nullptr) {
 				m_verifier.reset(new CpSeq::Verifier(m_renderer, m_interrupt_event_id));
@@ -2017,6 +2020,9 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	// Draw-prep: every draw parsed in this slice is committed before the slice ends.
 	DrainPreparedDraws();
 	const bool complete = execution.m_buffer_stack.empty();
+	if (complete && CpStreamDiag()) {
+		CpStreamDiagVerify(&execution);
+	}
 	if (complete && m_verifier != nullptr && m_verifier->Follows(execution.m_stream_id)) {
 		// KYTY_CP_SEQ_VERIFY: the reference front must end its stream here too.
 		m_verifier->Finish();
@@ -2035,8 +2041,102 @@ void CommandProcessor::NoteRepeatTraceDrawPacket() {
 	RepeatTrace::NoteDrawPacket(packet);
 }
 
+// KYTY_CP_STREAM_DIAG=1: each command stream and indirect buffer is copied when the CP starts it
+// and compared with guest memory when its stream completes. A difference means the guest (or a
+// GPU write that reached guest memory) changed commands the CP was already parsing: Saros' CP
+// "unknown op" exits land inside packets whose headers now say otherwise.
+namespace {
+bool CpStreamDiag() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_CP_STREAM_DIAG");
+		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+struct CpStreamCopy {
+	const uint32_t*       address = nullptr;
+	std::vector<uint32_t> words;
+	bool                  gpu_touched = false;
+	std::chrono::steady_clock::time_point start;
+};
+std::mutex                                                          g_stream_diag_mutex;
+std::unordered_map<const void*, std::vector<CpStreamCopy>>          g_stream_diag_copies;
+struct CpStreamStats {
+	uint64_t buffers = 0, dwords = 0, touched = 0, changed = 0, changed_dwords = 0;
+	std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+};
+CpStreamStats g_stream_diag_stats;
+
+void CpStreamDiagCopy(const void* execution, std::span<const uint32_t> commands) {
+	if (commands.empty()) {
+		return;
+	}
+	CpStreamCopy copy;
+	copy.address     = commands.data();
+	copy.words.assign(commands.begin(), commands.end());
+	const auto begin = reinterpret_cast<uint64_t>(commands.data());
+	copy.gpu_touched = GpuTouched::g_pages.AnyTouched(begin, begin + commands.size_bytes());
+	copy.start       = std::chrono::steady_clock::now();
+	const std::lock_guard lock(g_stream_diag_mutex);
+	g_stream_diag_copies[execution].push_back(std::move(copy));
+}
+
+void CpStreamDiagVerify(const void* execution) {
+	std::vector<CpStreamCopy> copies;
+	{
+		const std::lock_guard lock(g_stream_diag_mutex);
+		const auto found = g_stream_diag_copies.find(execution);
+		if (found == g_stream_diag_copies.end()) {
+			return;
+		}
+		copies = std::move(found->second);
+		g_stream_diag_copies.erase(found);
+	}
+	static std::atomic<uint32_t> logged {0};
+	const auto                   now = std::chrono::steady_clock::now();
+	const std::lock_guard        lock(g_stream_diag_mutex);
+	auto&                        stats = g_stream_diag_stats;
+	for (const auto& copy: copies) {
+		stats.buffers++;
+		stats.dwords += copy.words.size();
+		stats.touched += copy.gpu_touched ? 1u : 0u;
+		uint32_t first = UINT32_MAX, count = 0;
+		for (uint32_t i = 0; i < copy.words.size(); i++) {
+			if (copy.address[i] != copy.words[i]) {
+				first = std::min(first, i);
+				count++;
+			}
+		}
+		if (count == 0) {
+			continue;
+		}
+		stats.changed++;
+		stats.changed_dwords += count;
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 48u) {
+			const auto ms = std::chrono::duration<double, std::milli>(now - copy.start).count();
+			std::printf("Kyty CP stream diag: commands at 0x%016" PRIx64 " (%zu dw%s) changed while "
+			            "the CP used them: %u dw, first at +0x%05x (%08x -> %08x), %.2f ms after "
+			            "the CP started them\n",
+			            reinterpret_cast<uint64_t>(copy.address), copy.words.size(),
+			            copy.gpu_touched ? ", GPU-touched" : "", count, first, copy.words[first],
+			            copy.address[first], ms);
+		}
+	}
+	if (now - stats.since >= std::chrono::seconds(10)) {
+		std::printf("Kyty CP stream diag 10s: %" PRIu64 " buffers (%" PRIu64 " dw), %" PRIu64
+		            " GPU-touched, %" PRIu64 " changed while in use (%" PRIu64 " dw)\n",
+		            stats.buffers, stats.dwords, stats.touched, stats.changed, stats.changed_dwords);
+		std::fflush(stdout);
+		stats = {};
+	}
+}
+} // namespace
+
 void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain) {
 	EXIT_IF(g_current_execution == nullptr);
+	if (CpStreamDiag() && m_front_mode != FrontMode::Reference && m_front_mode != FrontMode::Prefetch) {
+		CpStreamDiagCopy(g_current_execution, commands);
+	}
 	if (RepeatTrace::Enabled() && m_front_mode != FrontMode::Reference) {
 		RepeatTrace::OnIndirectBuffer(commands, chain);
 	}
