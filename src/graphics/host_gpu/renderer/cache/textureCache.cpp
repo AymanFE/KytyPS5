@@ -4857,6 +4857,18 @@ void TextureCache::SyncAliasFromOwner(ImageId id) {
 			}
 		}
 		const bool lossless = CopyImage(id, other_id, "alias-sync");
+		// A copy that could not run (texel sizes differ, or the owner's bytes live in the buffer)
+		// marks this alias buffer-modified so its next use rebuilds it from guest memory; a GPU
+		// write commit here would clear that and keep its stale contents as current.
+		// KYTY_ALIAS_SYNC_KEEP_REBUILD=0 restores the old commit.
+		static const bool keep_rebuild = [] {
+			const char* value = std::getenv("KYTY_ALIAS_SYNC_KEEP_REBUILD");
+			return value == nullptr || std::strcmp(value, "0") != 0;
+		}();
+		if (keep_rebuild && !lossless && m_slot_images[id].IsBufferModified()) {
+			trace_sync("rebuild-from-memory", 0);
+			return;
+		}
 		CommitGpuWrite(image);
 		if (lossless && AliasSyncSkipEnabled()) {
 			image.AdoptContentSerial(m_slot_images[other_id].ContentSerial());
