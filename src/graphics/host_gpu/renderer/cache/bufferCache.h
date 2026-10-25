@@ -776,6 +776,9 @@ private:
 		// KYTY_HOT_PAGE_BACKOFF: the check limit and the quiet frames of this page are shifted left
 		// by it (m_hot_backoff).
 		uint32_t                   backoff          = 0;
+		// KYTY_HOT_PAGE_EPOCH_COMPARE: the guest synchronization epoch (syncEpoch.h) in which an
+		// upload last compared the page with this shadow, or 0.
+		uint64_t                   compared_epoch   = 0;
 	};
 	std::map<uint64_t, HotShadow>                     m_hot_shadows;
 	// KYTY_HOT_PAGE_BACKOFF (default 1; 0 off): a page that returned to fault tracking (settled or

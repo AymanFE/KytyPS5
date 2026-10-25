@@ -1745,6 +1745,9 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 	}
 	const auto frame     = m_memory_tracker.Frame();
 	const auto max_pages = m_memory_tracker.GetFaultPolicy().hot_max;
+	static const bool epoch_compare =
+	    ParseEnvU64("KYTY_HOT_PAGE_EPOCH_COMPARE", 1) != 0 && SyncEpoch::Enabled();
+	const auto epoch     = SyncEpoch::Current();
 	uint64_t   staged    = 0;
 	uint64_t   visited   = 0;
 	uint64_t   skipped   = 0;
@@ -1759,6 +1762,17 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 			auto shadow = m_hot_shadows.end();
 			if (next != m_hot_shadows.end() && next->first == page) {
 				shadow = next++;
+			}
+			// KYTY_HOT_PAGE_EPOCH_COMPARE (default 1; 0 off): a hot page an upload already compared
+			// in this guest synchronization epoch is not compared again. A CPU write since then
+			// races the GPU on the hardware too (syncEpoch.h), and the buffer holds the shadow.
+			// Saros visits each hot page dozens of times a frame: about 2.4 million 4 KiB compares
+			// a second once its hot set stopped being settled before every BDA writer.
+			if (epoch_compare && shadow != m_hot_shadows.end() &&
+			    shadow->second.compared_epoch == epoch) {
+				skipped++;
+				shadow->second.last_use = frame;
+				continue;
 			}
 			const auto unchanged = [&](const void* contents) {
 				return shadow != m_hot_shadows.end() &&
@@ -1778,8 +1792,9 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 			}
 			if (same) {
 				skipped++;
-				auto& state    = shadow->second;
-				state.last_use = frame;
+				auto& state          = shadow->second;
+				state.last_use       = frame;
+				state.compared_epoch = epoch;
 				const bool new_frame = state.last_check != frame;
 				state.last_check     = frame;
 				if (frame - state.last_change > (m_hot_quiet_frames << state.backoff)) {
@@ -1826,6 +1841,7 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 				shadow->second.last_use         = frame;
 				shadow->second.unchanged_checks = 0;
 				shadow->second.last_check       = frame;
+				shadow->second.compared_epoch   = epoch;
 			}
 			copies.emplace_back(total_size, buffer.Offset(page), TRACKER_PAGE_SIZE);
 			total_size += TRACKER_PAGE_SIZE;
