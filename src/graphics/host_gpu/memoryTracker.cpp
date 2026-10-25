@@ -3,9 +3,49 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 namespace Libs::Graphics {
 
 static_assert(std::atomic<void*>::is_always_lock_free);
+
+void NoteHotDemotions(HotDemoteSite site, uint32_t pages) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_HOT_DEMOTE_STATS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!enabled || pages == 0) {
+		return;
+	}
+	constexpr auto                                      count = static_cast<size_t>(HotDemoteSite::Count);
+	static std::array<std::atomic<uint64_t>, count>     pages_by_site {};
+	static std::atomic<int64_t>                         reported_ms {0};
+	pages_by_site[static_cast<size_t>(site)].fetch_add(pages, std::memory_order_relaxed);
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	auto last = reported_ms.load(std::memory_order_relaxed);
+	if (last == 0) {
+		reported_ms.compare_exchange_strong(last, now_ms);
+		return;
+	}
+	if (now_ms - last < 5000 || !reported_ms.compare_exchange_strong(last, now_ms)) {
+		return;
+	}
+	static constexpr const char* NAMES[count] = {"explicit", "settle",         "sweep",          "untrack",
+	                                            "upload",   "written-binding", "written-upload"};
+	std::string line = "Hot demotions last 5 s:";
+	for (size_t i = 0; i < count; i++) {
+		line += " " + std::string(NAMES[i]) + " " +
+		        std::to_string(pages_by_site[i].exchange(0, std::memory_order_relaxed));
+	}
+	std::printf("%s\n", line.c_str());
+	std::fflush(stdout);
+}
 
 MemoryTracker::MemoryTracker(PageManager& page_manager, bool track_cpu_mutations,
                              FaultPolicy fault_policy)
@@ -43,6 +83,7 @@ void MemoryTracker::DemoteHotPages(uint64_t vaddr, uint64_t size) {
 		demoted += manager->DemoteHot(manager->GetCpuAddr() + offset, bytes, m_hot_count);
 	});
 	MemoryStats::Count(MemoryStats::Counter::HotDemotions, demoted);
+	NoteHotDemotions(HotDemoteSite::Explicit, demoted);
 }
 
 std::vector<uint64_t> MemoryTracker::SettleHotPages(uint64_t vaddr, uint64_t size) {
@@ -72,6 +113,7 @@ std::vector<uint64_t> MemoryTracker::SettleHotPages(uint64_t vaddr, uint64_t siz
 		}
 	}
 	MemoryStats::Count(MemoryStats::Counter::HotDemotions, pages.size());
+	NoteHotDemotions(HotDemoteSite::Settle, static_cast<uint32_t>(pages.size()));
 	return pages;
 }
 
@@ -100,6 +142,7 @@ void MemoryTracker::SweepHotPages(uint32_t idle_frames) {
 		demoted += manager->SweepHot(frame, idle_frames, m_hot_count);
 	}
 	MemoryStats::Count(MemoryStats::Counter::HotDemotions, demoted);
+	NoteHotDemotions(HotDemoteSite::Sweep, static_cast<uint32_t>(demoted));
 }
 
 MemoryTracker::~MemoryTracker() = default;
@@ -421,6 +464,7 @@ void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 		demoted += manager->DemoteHot(manager->GetCpuAddr() + offset, bytes, m_hot_count);
 	});
 	MemoryStats::Count(MemoryStats::Counter::HotDemotions, demoted);
+	NoteHotDemotions(HotDemoteSite::Untrack, demoted);
 }
 
 } // namespace Libs::Graphics

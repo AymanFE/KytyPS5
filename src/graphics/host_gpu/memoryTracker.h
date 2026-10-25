@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <type_traits>
@@ -17,6 +18,19 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+// KYTY_HOT_DEMOTE_STATS=1: hot pages demoted, by cause, printed on stdout every 5 s.
+enum class HotDemoteSite : uint32_t {
+	Explicit,      // DemoteHotPages
+	Settle,        // CollectHotPages (a settle takes the hot pages back)
+	Sweep,         // SweepHotPages (quiet pages)
+	Untrack,       // UntrackMemory
+	UploadPlain,   // ForEachUploadRange without hot awareness
+	UploadWritten, // ForEachUploadRange of a range the GPU writes
+	WrittenUpload, // ForEachWrittenUploadRange
+	Count
+};
+void NoteHotDemotions(HotDemoteSite site, uint32_t pages);
 
 class MemoryTracker final {
 public:
@@ -299,6 +313,7 @@ public:
 			}
 		});
 		MemoryStats::Count(MemoryStats::Counter::HotDemotions, demoted);
+		NoteHotDemotions(is_written ? HotDemoteSite::UploadWritten : HotDemoteSite::UploadPlain, demoted);
 		upload_func();
 		// No clean-verdict bump: these GPU bits are not read by clean-read verdicts, and the
 		// only writer (BufferCache::ObtainBuffer) bumps when it adds the exact dirty range.
@@ -365,6 +380,7 @@ public:
 		});
 		s_upload_owner = previous_upload_owner;
 		MemoryStats::Count(MemoryStats::Counter::HotDemotions, demoted);
+		NoteHotDemotions(HotDemoteSite::WrittenUpload, demoted);
 		MemoryStats::Count(MemoryStats::Counter::WrittenUploadLatePages, late_pages);
 	}
 
