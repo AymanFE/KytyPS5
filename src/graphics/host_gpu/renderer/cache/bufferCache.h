@@ -18,6 +18,7 @@
 #include <chrono>
 #include <deque>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -578,6 +579,10 @@ private:
 	// m_hot_scratch from the first appended srcOffset on) for those that differ from their
 	// shadow, and lists pages to return to normal tracking: `demote` (still CPU-dirty) and
 	// `settle` (KYTY_HOT_PAGE_CHECK_LIMIT; SettleHotPages after the upload collection).
+	// KYTY_HOT_PAGE_BACKOFF (m_hot_backoff): a hot page left the hot set at `frame` with `level`;
+	// the level a page newly hot at `frame` starts with.
+	void     NoteHotPageLeft(uint64_t page, uint32_t level, uint32_t frame);
+	uint32_t HotPageBackoff(uint64_t page, uint32_t frame);
 	void CollectHotPages(Buffer& buffer, std::span<const GuestRange> hot_ranges,
 	                     std::vector<vk::BufferCopy>& copies, uint64_t& total_size,
 	                     std::vector<uint64_t>& demote, std::vector<uint64_t>& settle);
@@ -767,8 +772,21 @@ private:
 		// the frame that last counted one.
 		uint32_t                   unchanged_checks = 0;
 		uint32_t                   last_check       = 0;
+		// KYTY_HOT_PAGE_BACKOFF: the check limit and the quiet frames of this page are shifted left
+		// by it (m_hot_backoff).
+		uint32_t                   backoff          = 0;
 	};
 	std::map<uint64_t, HotShadow>                     m_hot_shadows;
+	// KYTY_HOT_PAGE_BACKOFF (default 1; 0 off): a page that returned to fault tracking (settled or
+	// quiet) and is hot again within twice its limits doubles them, up to 2^8 times; one hot again
+	// later starts over. Saros's UE threads write tens of thousands of pages each every few
+	// frames: with fixed limits every one settled, faulted on its next write (~90 us) and was
+	// promoted again, about 15,000 times a second.
+	struct HotBackoff {
+		uint32_t level   = 0;
+		uint32_t settled = 0; // frame it left the hot set
+	};
+	std::unordered_map<uint64_t, HotBackoff>          m_hot_backoff;
 	std::vector<uint8_t>                              m_hot_scratch;
 	uint32_t                                          m_hot_quiet_frames = 8;
 	// KYTY_HOT_PAGE_CHECK_LIMIT (default 4; 0 disables): a hot page whose uploads found it

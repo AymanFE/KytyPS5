@@ -1699,6 +1699,38 @@ void BufferCache::MaintainHotPages() {
 	std::erase_if(m_hot_shadows, [this, frame](const auto& entry) {
 		return frame - entry.second.last_use > m_hot_quiet_frames;
 	});
+	// Back-off levels of pages that stayed away long enough to start over.
+	std::erase_if(m_hot_backoff, [this, frame](const auto& entry) {
+		return frame - entry.second.settled >
+		       2u * (std::max(m_hot_check_limit, m_hot_quiet_frames) << entry.second.level);
+	});
+}
+
+static bool HotPageBackoffEnabled() {
+	static const bool enabled = ParseEnvU64("KYTY_HOT_PAGE_BACKOFF", 1) != 0;
+	return enabled;
+}
+
+void BufferCache::NoteHotPageLeft(uint64_t page, uint32_t level, uint32_t frame) {
+	if (HotPageBackoffEnabled()) {
+		m_hot_backoff[page] = {level, frame};
+	}
+}
+
+uint32_t BufferCache::HotPageBackoff(uint64_t page, uint32_t frame) {
+	if (!HotPageBackoffEnabled()) {
+		return 0;
+	}
+	const auto it = m_hot_backoff.find(page);
+	if (it == m_hot_backoff.end()) {
+		return 0;
+	}
+	constexpr uint32_t max_level = 8;
+	const auto         entry     = it->second;
+	m_hot_backoff.erase(it);
+	// Hot again soon after it left (within twice the limits it left with): those were too short.
+	const auto window = 2u * (std::max(m_hot_check_limit, m_hot_quiet_frames) << entry.level);
+	return frame - entry.settled <= window ? std::min(entry.level + 1u, max_level) : 0u;
 }
 
 void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> hot_ranges,
@@ -1750,13 +1782,15 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 				state.last_use = frame;
 				const bool new_frame = state.last_check != frame;
 				state.last_check     = frame;
-				if (frame - state.last_change > m_hot_quiet_frames) {
+				if (frame - state.last_change > (m_hot_quiet_frames << state.backoff)) {
+					NoteHotPageLeft(page, state.backoff, frame);
 					demote.push_back(page);
 				} else if (m_hot_check_limit != 0 && new_frame &&
-				           ++state.unchanged_checks >= m_hot_check_limit) {
+				           ++state.unchanged_checks >= (m_hot_check_limit << state.backoff)) {
 					// Checked far more often than written: back to fault tracking, clean (the
 					// buffer holds exactly the shadow, which SettleHotPages compares again once the
 					// page is write-protected).
+					NoteHotPageLeft(page, state.backoff, frame);
 					settle.push_back(page);
 					settled++;
 				}
@@ -1779,7 +1813,8 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 			if (shadow == m_hot_shadows.end()) {
 				if (m_hot_shadows.size() < max_pages) {
 					shadow = m_hot_shadows.emplace(page, HotShadow {}).first;
-					shadow->second.data = std::make_unique<uint8_t[]>(TRACKER_PAGE_SIZE);
+					shadow->second.data    = std::make_unique<uint8_t[]>(TRACKER_PAGE_SIZE);
+					shadow->second.backoff = HotPageBackoff(page, frame);
 				} else {
 					// No shadow to compare against: back to faulting on writes.
 					demote.push_back(page);
