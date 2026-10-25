@@ -953,21 +953,48 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 					}
 				}
 				exemplar = best;
+				// The class of each candidate the exemplar's class excludes, once per instruction.
+				static std::mutex                   class_mutex;
+				static std::unordered_set<uint64_t> class_seen;
+				const uint64_t class_id = program.shader_hash ^
+				                          (uint64_t {program.info.images[root_index].first_use_pc} << 1u);
+				bool describe = false;
+				{
+					const std::lock_guard lock(class_mutex);
+					describe = class_seen.size() < 256u && class_seen.insert(class_id).second;
+				}
+				const auto class_text = [&](uint32_t c) {
+					const auto& image = specialization.images[c];
+					const auto& words = snapshot.images[c].dwords;
+					return fmt::format("dim {} cube {} numeric {} mips {} conversion {} swizzle {:x} format {} "
+					                   "T# {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+					                   static_cast<uint32_t>(image.dimension), image.cube ? 1 : 0,
+					                   static_cast<uint32_t>(image.numeric_class), image.mip_count,
+					                   static_cast<uint32_t>(image.conversion_format),
+					                   static_cast<uint32_t>(image.shader_swizzle), (words[1] >> 20u) & 0x1ffu,
+					                   words[0], words[1], words[2], words[3], words[4], words[5], words[6],
+					                   words[7]);
+				};
+				std::string excluded;
 				uint32_t nulled = 0;
 				for (uint32_t c = 0; c < specialization.images.size() && best != ImageResource::NoIndirectImage; c++) {
 					if (specialization.images[c].indirect_root == root_index &&
 					    !NullImageDescriptor(snapshot.images[c]) &&
 					    !same_class(specialization.images[c], specialization.images[best])) {
+						if (describe && nulled < 4u) {
+							excluded += "\n    excluded: " + class_text(c);
+						}
 						snapshot.images[c].dwords.fill(0);
 						nulled++;
 					}
 				}
-				static std::atomic<uint32_t> reported {0};
-				if (nulled != 0 && reported.fetch_add(1, std::memory_order_relaxed) < 16u) {
+				if (nulled != 0 && describe) {
 					std::printf("KYTY_INDIRECT_TABLE_IMAGES: shader 0x%016llx pc 0x%08x: %u table "
-					            "candidates of another kind than the instruction's are null\n",
+					            "candidates of another kind than the instruction's are null (%u kept)\n"
+					            "    kept class: %s%s\n",
 					            static_cast<unsigned long long>(program.shader_hash),
-					            program.info.images[root_index].first_use_pc, nulled);
+					            program.info.images[root_index].first_use_pc, nulled, best_count,
+					            class_text(best).c_str(), excluded.c_str());
 				}
 			}
 		}
