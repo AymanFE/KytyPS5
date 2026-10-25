@@ -579,6 +579,30 @@ static bool IsUnsupportedCall(const Decoder::Instruction& inst) {
 	       inst.opcode_id == 0x21u;
 }
 
+static bool SwapPcNoop(uint64_t shader_hash) {
+	static const std::vector<uint64_t> hashes = [] {
+		std::vector<uint64_t> list;
+		const char*           value = std::getenv("KYTY_SWAPPC_NOOP");
+		if (value == nullptr) {
+			return list;
+		}
+		std::string_view text(value);
+		while (!text.empty()) {
+			const auto comma = text.find(',');
+			const std::string token(text.substr(0, comma));
+			list.push_back(token == "all" ? UINT64_MAX : std::strtoull(token.c_str(), nullptr, 16));
+			if (comma == std::string_view::npos) {
+				break;
+			}
+			text.remove_prefix(comma + 1);
+		}
+		return list;
+	}();
+	return std::ranges::any_of(hashes, [&](uint64_t hash) {
+		return hash == UINT64_MAX || hash == shader_hash;
+	});
+}
+
 // Diagnostics for a program skipped for S_SWAPPC_B64: the functions its calls jump to, as the
 // dispatch's user data gives them. Psr's shader-mesh builders copy a callback record from user
 // SGPRs into their link registers before each call (s_mov_b32 s14, s8; s_mov_b32 s15, s9;
@@ -840,6 +864,21 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		decoded_dump = Decoder::ProgramToString(decoded);
 		if (options.early_dump) {
 			LOGF("%s decoded RDNA2 (early):\n%s", GetDumpLabel(options), decoded_dump.c_str());
+		}
+	}
+	// KYTY_SWAPPC_NOOP=all|<hash>[,<hash>...]: the listed programs' S_SWAPPC_B64 calls return at
+	// once (each becomes S_NOP; the link registers keep the target) instead of the program being
+	// skipped. For calls to optional hooks: Saros' CS 0xd872ee3c0e77b1ff, a dispatch-count
+	// compaction, calls the function at [0xf_e0040000 table + 32] only when that pointer is nonzero.
+	if (SwapPcNoop(options.shader_hash)) {
+		for (auto& inst: decoded.instructions) {
+			if (IsUnsupportedCall(inst)) {
+				inst.family    = Decoder::Family::SOPP;
+				inst.opcode    = Decoder::Opcode::S_NOP;
+				inst.dst       = {};
+				inst.src0      = {};
+				inst.src_count = 0;
+			}
 		}
 	}
 	// KYTY_SRT_VARIANT_READS: a program that calls a function through S_SWAPPC_B64 is skipped with
