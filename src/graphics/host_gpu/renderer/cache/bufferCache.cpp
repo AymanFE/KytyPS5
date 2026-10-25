@@ -40,6 +40,7 @@
 #include <bit>
 #include <intrin.h>
 #include <array>
+#include <set>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -5622,10 +5623,11 @@ BdaWritesMode GetBdaWritesMode() {
 
 // One console line per shader for each kind of BDA-write anomaly.
 bool FirstBdaWriteNote(uint64_t shader_hash, uint32_t kind) {
-	static std::mutex                   mutex;
-	static std::unordered_set<uint64_t> noted;
-	std::scoped_lock                    lock(mutex);
-	return noted.insert(shader_hash ^ (static_cast<uint64_t>(kind) << 62u)).second;
+	// Keyed by the pair: kinds 4 and up folded onto 0-3 when shifted into the hash's top bits.
+	static std::mutex                             mutex;
+	static std::set<std::pair<uint64_t, uint32_t>> noted;
+	std::scoped_lock                              lock(mutex);
+	return noted.insert({shader_hash, kind}).second;
 }
 
 } // namespace
@@ -5886,13 +5888,30 @@ uint32_t BufferCache::ApplyBdaStoreLog(std::span<const FaultManager::BdaStore> s
 	for (const auto& store: stores) {
 		dwords.Add(store.Address() & ~uint64_t {3}, sizeof(uint32_t));
 	}
+	// KYTY_BDA_STORE_LOG_IMAGES (default 1; =0 refuses them as before): bytes only a GPU-modified
+	// image owns take the stores, and the image loses those bytes as it does under a BDA write
+	// into a cache buffer. Saros reuses an old render target's memory for its BVH nodes
+	// (0x3061184000): refusing the builder's stores there left the refit climbing stale links.
+	static const bool over_images = [] {
+		const auto* value = std::getenv("KYTY_BDA_STORE_LOG_IMAGES");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
 	RangeSet refused;
+	RangeSet from_images;
+	bool     refused_buffer = false;
 	dwords.ForEach([&](uint64_t start, uint64_t end) {
 		const auto bytes = end - start;
-		if (HasGpuDirtyBytes(start, bytes) || HasPendingBackingPublication(start, bytes) ||
-		    m_texture_cache.IsRegionGpuModified(start, bytes)) {
+		if (HasGpuDirtyBytes(start, bytes) || HasPendingBackingPublication(start, bytes)) {
 			refused.Add(start, bytes);
+			refused_buffer = true;
 			return;
+		}
+		if (m_texture_cache.IsRegionGpuModified(start, bytes)) {
+			if (!over_images) {
+				refused.Add(start, bytes);
+				return;
+			}
+			from_images.Add(start, bytes);
 		}
 		InvalidateMemory(start, bytes);
 		m_texture_cache.InvalidateMemory(start, bytes);
@@ -5913,12 +5932,21 @@ uint32_t BufferCache::ApplyBdaStoreLog(std::span<const FaultManager::BdaStore> s
 		}
 		HangTrace::NoteGpuWrite(address, sizeof(word));
 	}
+	from_images.ForEach([&](uint64_t start, uint64_t end) {
+		m_texture_cache.InvalidateMemoryFromGPU(start, end - start);
+	});
 	// A memory write the command processor orders before later work (syncEpoch.h).
 	SyncEpoch::Advance();
 	if (!refused.Empty() && FirstBdaWriteNote(shader_hash, 4)) {
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "KYTY_BDA_STORE_LOG: CS shader 0x{:016x} stored to bytes without a cache buffer that the "
-		    "GPU still owns; those stores are dropped.\n",
+		    "GPU still owns ({}); those stores are dropped.\n",
+		    shader_hash, refused_buffer ? "GPU-dirty or unpublished buffer bytes" : "a GPU-modified image"));
+	}
+	if (!from_images.Empty() && FirstBdaWriteNote(shader_hash, 6)) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "KYTY_BDA_STORE_LOG: CS shader 0x{:016x} stored over a GPU-modified image; the image "
+		    "gave up those bytes (KYTY_BDA_STORE_LOG_IMAGES).\n",
 		    shader_hash));
 	}
 	return dropped;
