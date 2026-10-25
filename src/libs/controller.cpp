@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace Libs::Controller {
@@ -469,8 +470,9 @@ void GetTriggerEffectState(int32_t* state) {
 	g_players[0]->GetTriggerEffectState(state);
 }
 
-// KYTY_AUTO_PAD="25:cross,33:right,41:options" presses player 1's buttons at the given seconds after
-// start (held 150 ms), as the keyboard would, for unattended test runs.
+// KYTY_AUTO_PAD="25:cross,33:right:500,60:lup:8000" presses player 1's buttons at the given seconds
+// after start, held for the optional milliseconds (default 150), as the keyboard would, for unattended
+// test runs. lup/ldown/lleft/lright push the left stick fully for the hold instead.
 static void StartAutoPad() {
 	const char* value = std::getenv("KYTY_AUTO_PAD");
 	if (value == nullptr || *value == '\0') {
@@ -482,8 +484,18 @@ static void StartAutoPad() {
 	    {"down", PAD_BUTTON_DOWN},         {"left", PAD_BUTTON_LEFT},     {"right", PAD_BUTTON_RIGHT},
 	    {"l1", PAD_BUTTON_L1},             {"r1", PAD_BUTTON_R1},         {"l2", PAD_BUTTON_L2},
 	    {"r2", PAD_BUTTON_R2},             {"touchpad", PAD_BUTTON_TOUCH_PAD}};
-	std::vector<std::pair<double, uint32_t>> presses;
-	std::string_view                         list(value);
+	// The left stick: the axis and its full value; the stick rests at 128.
+	static constexpr std::tuple<std::string_view, Axis, int> STICKS[] = {
+	    {"lup", Axis::LeftY, 0}, {"ldown", Axis::LeftY, 255}, {"lleft", Axis::LeftX, 0}, {"lright", Axis::LeftX, 255}};
+	struct Press {
+		double   seconds = 0.0;
+		int64_t  hold_ms = 150;
+		uint32_t mask    = 0;
+		int      axis    = -1;
+		int      value   = 128;
+	};
+	std::vector<Press> presses;
+	std::string_view   list(value);
 	while (!list.empty()) {
 		const auto comma = list.find(',');
 		const auto item  = list.substr(0, comma);
@@ -492,29 +504,50 @@ static void StartAutoPad() {
 		if (colon == std::string_view::npos) {
 			continue;
 		}
-		const double seconds = std::strtod(std::string(item.substr(0, colon)).c_str(), nullptr);
-		const auto   name    = item.substr(colon + 1);
+		Press press;
+		press.seconds    = std::strtod(std::string(item.substr(0, colon)).c_str(), nullptr);
+		auto       name  = item.substr(colon + 1);
+		const auto colon2 = name.find(':');
+		if (colon2 != std::string_view::npos) {
+			press.hold_ms = std::strtoll(std::string(name.substr(colon2 + 1)).c_str(), nullptr, 10);
+			name          = name.substr(0, colon2);
+		}
 		for (const auto& [n, mask]: NAMES) {
 			if (n == name) {
-				presses.emplace_back(seconds, mask);
+				press.mask = mask;
 			}
+		}
+		for (const auto& [n, axis, full]: STICKS) {
+			if (n == name) {
+				press.axis  = static_cast<int>(axis);
+				press.value = full;
+			}
+		}
+		if (press.mask != 0 || press.axis >= 0) {
+			presses.push_back(press);
 		}
 	}
 	std::printf("Auto pad: %zu presses scheduled (KYTY_AUTO_PAD)\n", presses.size());
 	std::thread([presses] {
 		const auto start = std::chrono::steady_clock::now();
-		for (const auto& [seconds, mask]: presses) {
-			std::this_thread::sleep_until(start + std::chrono::milliseconds(static_cast<int64_t>(seconds * 1000.0)));
+		for (const auto& press: presses) {
+			std::this_thread::sleep_until(start + std::chrono::milliseconds(static_cast<int64_t>(press.seconds * 1000.0)));
 			for (bool down: {true, false}) {
 				{
 					Common::LockGuard lock(g_router_mutex);
-					g_players[0]->Button(HOST_INPUT_CONTROLLER_ID, mask, down);
+					if (press.axis >= 0) {
+						g_players[0]->Axis(HOST_INPUT_CONTROLLER_ID, static_cast<Axis>(press.axis),
+						                   down ? press.value : 128);
+					} else {
+						g_players[0]->Button(HOST_INPUT_CONTROLLER_ID, press.mask, down);
+					}
 				}
 				if (down) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(150));
+					std::this_thread::sleep_for(std::chrono::milliseconds(press.hold_ms));
 				}
 			}
-			std::printf("Auto pad: pressed 0x%05x at %.1f s\n", mask, seconds);
+			std::printf("Auto pad: pressed 0x%05x axis %d for %lld ms at %.1f s\n", press.mask, press.axis,
+			            static_cast<long long>(press.hold_ms), press.seconds);
 			std::fflush(stdout);
 		}
 	}).detach();

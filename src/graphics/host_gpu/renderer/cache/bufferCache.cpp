@@ -5741,8 +5741,8 @@ void BufferCache::SettleBdaWrites(uint64_t shader_hash) {
 		if (FirstBdaWriteNote(shader_hash, 0)) {
 			Log::WriteToConsoleAndLog(fmt::format(
 			    "KYTY_BDA_WRITES: CS shader 0x{:016x} dropped {} write(s) to pages without a cache "
-			    "buffer (their faults create one for later dispatches).\n",
-			    shader_hash, writes.dropped));
+			    "buffer (their faults create one for later dispatches; {} past the store log, {} logged).\n",
+			    shader_hash, writes.dropped, writes.log_overflow, writes.stores.size()));
 		}
 		if (BdaWritesVerify()) {
 			EXIT("KYTY_BDA_WRITES=verify: shader 0x%016" PRIx64 " dropped %u BDA write(s)\n",
