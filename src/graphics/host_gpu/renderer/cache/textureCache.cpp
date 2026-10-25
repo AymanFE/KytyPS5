@@ -2110,7 +2110,18 @@ bool TextureCache::CopyImage(ImageId destination_id, ImageId source_id, const ch
 		}
 		auto& copy_buffer = m_buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
 		if (!destination.CopyImageWithBuffer(source, copy_buffer, m_tiler)) {
-			// Texel sizes differ: nothing was copied, and the destination keeps its contents.
+			// Texel sizes differ: on the console the destination aliases the source's bytes, read
+			// under its own format and tiling. KYTY_ALIAS_COPY_DOWNLOAD (default 1; =0 keeps the
+			// destination's contents): the source writes its bytes back to guest memory and the
+			// destination is rebuilt from them on its next use. Saros copies a 64x64 RGBA32F image
+			// into an R32F one this way (its exposure, by the look of it).
+			static const bool download = [] {
+				const char* value = std::getenv("KYTY_ALIAS_COPY_DOWNLOAD");
+				return value == nullptr || std::strcmp(value, "0") != 0;
+			}();
+			if (download && (!source.IsGpuModified() || DownloadImageMemory(source_id))) {
+				m_slot_images[destination_id].MarkBufferModified();
+			}
 			return false;
 		}
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ImageCopyViaBuffer);
