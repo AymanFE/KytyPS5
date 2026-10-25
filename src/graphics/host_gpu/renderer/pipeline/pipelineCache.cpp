@@ -6651,6 +6651,25 @@ static PipelineCache::GraphicsPrograms SkipUnmaterializable(const char* why) {
 	return {};
 }
 
+// A skipped dispatch per shader, logged at its 1st, 10th, 100th, ... skip: an intermittent skip of
+// a frame's pass (Saros' GI) shows as an occasional wrong frame.
+static void CountComputeSkip(uint64_t hash, const char* why) {
+	static std::mutex                             mutex;
+	static std::unordered_map<uint64_t, uint64_t> counts;
+	uint64_t                                      count = 0;
+	{
+		std::scoped_lock lock(mutex);
+		count = ++counts[hash];
+	}
+	for (uint64_t mark = 1; mark <= count; mark *= 10) {
+		if (mark == count) {
+			std::printf("Kyty skipped dispatch: CS 0x%016" PRIx64 " skipped %" PRIu64 " time(s): %s\n",
+			            hash, count, why);
+			break;
+		}
+	}
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
@@ -6850,6 +6869,7 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 				EXIT("compute resource readiness: a missing range cannot be synchronized\n");
 			}
 			(void)SkipUnmaterializable("a dispatch's resource tables read memory that cannot be synchronized");
+			CountComputeSkip(params.hash, "resource tables read memory that cannot be synchronized");
 			return {};
 		}
 	}
@@ -6857,6 +6877,7 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 		EXIT("compute resource readiness did not converge after 64 attempts\n");
 	}
 	(void)SkipUnmaterializable("a dispatch's resource readiness did not converge after 64 attempts");
+	CountComputeSkip(params.hash, "resource readiness did not converge after 64 attempts");
 	return {};
 }
 
