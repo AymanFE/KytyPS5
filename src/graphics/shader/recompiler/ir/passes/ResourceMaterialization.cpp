@@ -465,10 +465,15 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 	if (!indirect.selector) {
 		uint32_t key_count = 0;
 		const bool evaluated = clean.Evaluate(indirect.key_count, key_count);
-		if (evaluated && key_count == DescriptorSource::IndirectDescriptor::TableBoundedKeys) {
+		// The sentinel is the plan's immediate, never an evaluated runtime count (a loop bound of
+		// UINT32_MAX is a negative count: no candidates).
+		const auto bound = indirect.key_count.Resolve();
+		if (bound.IsImmediate() && bound.GetType() == Type::U32 &&
+		    bound.U32() == DescriptorSource::IndirectDescriptor::TableBoundedKeys &&
+		    table_value.dword_count == 4u) {
 			// KYTY_INDIRECT_TABLE_IMAGES: every entry the table's V# covers (scalar buffer loads
 			// past num_records read zeros, a null T#).
-			if (table_value.dword_count != 4u || indirect.table_offset >= table_size) {
+			if (indirect.table_offset >= table_size) {
 				return false;
 			}
 			const auto entries = std::min<uint64_t>((table_size - indirect.table_offset) / 32u,
