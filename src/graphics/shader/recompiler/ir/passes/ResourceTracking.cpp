@@ -883,6 +883,18 @@ private:
 
 	// KYTY_INDIRECT_IMAGE_DIAG=1: which check refused an indirect image plan (source line), once per
 	// pc; the program's skip line names the shader.
+	static bool IndirectFailText(uint32_t pc, const std::string& text) {
+		static const bool diag = [] {
+			const char* value = std::getenv("KYTY_INDIRECT_IMAGE_DIAG");
+			return value != nullptr && std::strcmp(value, "1") == 0;
+		}();
+		if (diag) {
+			std::printf("KYTY_INDIRECT_IMAGE_DIAG: unresolved descriptor at pc=0x%08x: %s\n", pc,
+			            text.substr(0, 600).c_str());
+		}
+		return false;
+	}
+
 	static bool IndirectFail(uint32_t pc, int line, const Inst* value = nullptr, uint32_t dword = 0) {
 		static const bool diag = [] {
 			const char* value = std::getenv("KYTY_INDIRECT_IMAGE_DIAG");
@@ -1125,6 +1137,26 @@ private:
 				return false;
 			}
 			if (m_indirect_scalar_buffers) {
+				// KYTY_INDIRECT_IMAGE_DIAG: the word that is no runtime value, and what computes it
+				// (three levels).
+				const auto describe = [&](auto&& self, Value word, int depth) -> std::string {
+					const auto* inst = word.Resolve().TryInstruction();
+					if (inst == nullptr) {
+						return "imm";
+					}
+					std::string text(ValueOpcodeName(inst->GetOpcode()));
+					if (depth < 3 && inst->NumArgs() != 0) {
+						text += "(";
+						for (size_t arg = 0; arg < inst->NumArgs() && arg < 4; ++arg) {
+							text += (arg != 0 ? ", " : "") + self(self, inst->Arg(arg), depth + 1);
+						}
+						text += ")";
+					}
+					return text;
+				};
+				(void)IndirectFailText(pc, fmt::format("{} dword {} is no runtime value: {}",
+				                                       ValueOpcodeName(expected), bad_dword,
+				                                       describe(describe, descriptor.dwords[bad_dword], 0)));
 				MarkUnresolved(pc);
 				return false;
 			}

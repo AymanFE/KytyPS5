@@ -1051,19 +1051,42 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		    EmitValueOrDefaultIfCondition(
 		        state, condition, TypeU32Vector(state, 4), ConstantU32CompositeZero(state, 4),
 		        [&]() {
-			        const auto descriptor = LoadImageDescriptor(state, mem.resource);
-			        const auto color      = state.builder.AllocateId();
-			        const auto coord      = CoordU32(ctx, mem, *address, dimension);
-			        if (dimension_info.multisampled != 0u) {
-				        state.builder.AddFunction(
-				            spv::OpImageFetch, ImageVectorType(state, numeric_class, 4), color,
-				            descriptor, coord, spv::ImageOperandsSampleMask,
-				            AddressU32(ctx, mem, *address, dimension_info.coordinate_components));
+			        const auto Fetch = [&](uint32_t resource) {
+				        const auto descriptor = LoadImageDescriptor(state, resource);
+				        const auto color      = state.builder.AllocateId();
+				        const auto coord      = CoordU32(ctx, mem, *address, dimension);
+				        if (dimension_info.multisampled != 0u) {
+					        state.builder.AddFunction(
+					            spv::OpImageFetch, ImageVectorType(state, numeric_class, 4), color,
+					            descriptor, coord, spv::ImageOperandsSampleMask,
+					            AddressU32(ctx, mem, *address, dimension_info.coordinate_components));
+				        } else {
+					        state.builder.AddFunction(spv::OpImageFetch,
+					                                  ImageVectorType(state, numeric_class, 4), color,
+					                                  descriptor, coord, spv::ImageOperandsLodMask,
+					                                  LodU32(ctx, mem, *address, dimension));
+				        }
+				        return color;
+			        };
+			        auto color = 0u;
+			        if (image.indirect_root != mem.resource) {
+				        color = Fetch(mem.resource);
 			        } else {
-				        state.builder.AddFunction(spv::OpImageFetch,
-				                                  ImageVectorType(state, numeric_class, 4), color,
-				                                  descriptor, coord, spv::ImageOperandsLodMask,
-				                                  LodU32(ctx, mem, *address, dimension));
+				        // An indirect (table) image: the key selects one candidate, each read
+				        // from its own binding (KYTY_INDIRECT_TABLE_IMAGES: bindless IMAGE_LOAD).
+				        const auto* handle = image_arg.ResolveInstruction();
+				        if (handle == nullptr || handle->NumArgs() == 0u ||
+				            state.flattened_srt_variable == 0 || image.indirect_resources.size() < 2u) {
+					        ctx.Fail(inst, "has no indirect image runtime mapping");
+					        return ConstantU32CompositeZero(state, 4);
+				        }
+				        const auto selected = EmitIndirectResourceIndex(
+				            state, ctx.Def(handle->Arg(0)), image.indirect_mapping_offset,
+				            image.indirect_search_iterations, 0u);
+				        color = EmitIndexSwitch(
+				            state, selected, static_cast<uint32_t>(image.indirect_resources.size()),
+				            ImageVectorType(state, numeric_class, 4),
+				            [&](uint32_t ordinal) { return Fetch(image.indirect_resources[ordinal]); });
 			        }
 			        return ResultVector(ctx, UnpackImageTexel(ctx, mem, color), numeric_class,
 			                            false, mem);
