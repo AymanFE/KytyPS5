@@ -1886,14 +1886,16 @@ ImageId TextureCache::FindImageWithSameBacking(const ImageInfo& requested,
 }
 
 ImageId TextureCache::GetNullImage(const ImageDesc& desc) {
-	const auto format = desc.info.pixel_format;
-	if (const auto found = m_null_images.find(format); found != m_null_images.end()) {
+	// A null T# of a volume (a bindless table's null candidate of a 3D IMAGE_LOAD) is viewed as 3D.
+	const bool volume = desc.info.IsVolume() || desc.view_info.type == vk::ImageViewType::e3D;
+	const auto key    = static_cast<uint64_t>(desc.info.pixel_format) | (volume ? 1ull << 63u : 0ull);
+	if (const auto found = m_null_images.find(key); found != m_null_images.end()) {
 		return found->second;
 	}
 	ImageInfo info {};
 	info.pixel_format    = desc.info.pixel_format;
 	info.guest_format    = desc.info.guest_format;
-	info.type            = Prospero::ImageType::kColor2D;
+	info.type            = volume ? Prospero::ImageType::kColor3D : Prospero::ImageType::kColor2D;
 	info.extent          = {1, 1, 1};
 	info.resources       = {1, 1};
 	info.pitch           = 1;
@@ -1902,7 +1904,7 @@ ImageId TextureCache::GetNullImage(const ImageDesc& desc) {
 	info.tile_mode       = Prospero::TileMode::kLinear;
 	info.mip_layout[0]   = {0, info.bytes_per_block, 1, 1};
 	const auto id        = InsertImage(info);
-	m_null_images.emplace(format, id);
+	m_null_images.emplace(key, id);
 	return id;
 }
 

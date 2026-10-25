@@ -555,7 +555,8 @@ private:
 	uint64_t m_gpu_dcc_fallbacks = 0;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
-	std::unordered_map<vk::Format, ImageId>           m_null_images;
+	// Keyed by format, plus bit 63 for a volume (a 3D view needs a 3D image).
+	std::unordered_map<uint64_t, ImageId>             m_null_images;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::atomic<uint64_t>                             m_frame {0};
