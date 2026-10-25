@@ -2628,7 +2628,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	if (std::ranges::any_of(prepared_bindings, [](const auto* prepared) {
 		    return prepared->runtime->program->has_address_writes;
 	    })) {
-		m_context.GetBufferCache().InvalidateContentRevisions();
+		// Writers whose pages the KYTY_BDA_WRITES settle lists settle their own hot pages.
+		const bool untracked = std::ranges::any_of(prepared_bindings, [](const auto* prepared) {
+			const auto* program = prepared->runtime->program;
+			return program->has_address_writes && !program->info.bda_writes;
+		});
+		m_context.GetBufferCache().InvalidateContentRevisions(untracked);
 	}
 	// State commands only: image transitions and the GDS dependency below go through the barrier
 	// batcher and are recorded at the caller's next flush point (the draw's BeginRendering, the

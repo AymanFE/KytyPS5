@@ -245,8 +245,9 @@ public:
 	[[nodiscard]] std::optional<BufferContentRevision> GetContentRevision(uint64_t vaddr,
 	                                                                    uint64_t size);
 	// Invalidate retained results before commands whose writes cannot be bounded to one buffer.
-	// Also disables side readbacks until the current recording is submitted.
-	void InvalidateContentRevisions();
+	// Also disables side readbacks until the current recording is submitted. settle_hot: false when
+	// every such writer's pages are listed by the KYTY_BDA_WRITES settle, which settles its hot pages.
+	void InvalidateContentRevisions(bool settle_hot = true);
 	// Image content serial (Image::NextContentSerial) taken when the latest unbounded writer was
 	// bound: an image whose ContentSerial is larger was written after it.
 	[[nodiscard]] uint64_t UnboundedWriteSerial() const noexcept { return m_unbounded_write_serial; }

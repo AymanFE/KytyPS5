@@ -4800,13 +4800,27 @@ std::optional<BufferContentRevision> BufferCache::GetContentRevision(uint64_t va
 	return BufferContentRevision {*owner, buffer.ContentRevision(), m_content_revision_epoch};
 }
 
-void BufferCache::InvalidateContentRevisions() {
+// KYTY_BDA_HOT_SETTLE_WRITTEN (default 1; =0 settles every hot page before each unbounded writer).
+static bool BdaHotSettleWritten() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_BDA_HOT_SETTLE_WRITTEN");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+void BufferCache::InvalidateContentRevisions(bool settle_hot) {
 	EXIT_IF(!GuestGpu::IsGpuThread() || m_content_revision_epoch == UINT64_MAX);
 	// Unbounded GPU writes follow; retire clean-read verdicts along with the revisions.
 	CleanVerdict::Invalidate(0, UINT64_MAX, Coherence::Source::ContentRevisions);
 	++m_content_revision_epoch;
-	// They may change any buffer byte, including bytes of hot pages.
-	SettleHotPages(0, 0);
+	// They may change any buffer byte, including bytes of hot pages. Writers whose pages the
+	// KYTY_BDA_WRITES settle lists settle only the hot pages they wrote (SettleBdaWrittenRange):
+	// settling every hot page before each of them (Saros: about 40 a second) demoted the whole hot
+	// set, so every page the guest writes each frame faulted again.
+	if (settle_hot || !BdaHotSettleWritten()) {
+		SettleHotPages(0, 0);
+	}
 	// Their bytes carry no writer tick, so no readback may skip this recording.
 	m_unbounded_write_tick = m_scheduler.CurrentTick();
 	// Nor do they clear the GPU ownership of images they may overwrite: order them against image
@@ -5838,6 +5852,12 @@ void BufferCache::SettleBdaWrittenRange(uint64_t vaddr, uint64_t size, uint64_t 
 		const auto start = range.address;
 		const auto bytes = range.size;
 		settled_pages += (bytes + CACHING_PAGESIZE - 1) / CACHING_PAGESIZE;
+		// KYTY_BDA_HOT_SETTLE_WRITTEN: the hot pages this dispatch wrote go back to fault tracking
+		// now (InvalidateContentRevisions left them hot), clean unless the guest changed them since
+		// their last upload, so that the synchronization below keeps the dispatch's bytes.
+		if (BdaHotSettleWritten()) {
+			SettleHotPages(start, bytes);
+		}
 		// An image that owned bytes here missed their move into the buffer before the write
 		// (writebacks off, or a GPU-modified image this dispatch made): its bytes are lost now.
 		if (m_texture_cache.IsRegionGpuModified(start, bytes)) {
