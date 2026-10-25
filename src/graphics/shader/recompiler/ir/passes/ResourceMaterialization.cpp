@@ -462,6 +462,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 	}
 	auto& keys = scratch.material_keys;
 	keys.clear();
+	bool table_bounded = false;
 	if (!indirect.selector) {
 		uint32_t key_count = 0;
 		const bool evaluated = clean.Evaluate(indirect.key_count, key_count);
@@ -483,6 +484,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			}
 			keys.resize(static_cast<size_t>(entries));
 			std::iota(keys.begin(), keys.end(), 0u);
+			table_bounded = true;
 		} else {
 			if (std::bit_cast<int32_t>(key_count) <= 0) key_count = 0;
 			if (table_value.dword_count != 2u || !evaluated ||
@@ -561,7 +563,12 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		candidate.dword_count = 8u;
 		const auto table_offset = (key << 5u) + indirect.table_offset;
 		if (!ReadScalarTable(table_base, table_size, table_offset, runtime, candidate.dwords)) {
-			return false;
+			// A table-bounded image's descriptor may claim more entries than are mapped: the
+			// unreadable ones are null candidates rather than a failed dispatch.
+			if (!table_bounded) {
+				return false;
+			}
+			candidate.dwords.fill(0);
 		}
 		if (NullImageDescriptor(candidate) ||
 		    !ValidImageDescriptor(candidate, program.info.images[image_index].r128)) {
@@ -584,7 +591,20 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			ordinal = lookup.ordinal;
 			if (ordinal > snapshot.images.size() - children_begin) {
 				if (snapshot.images.size() >= ShaderInfo::MaxImages) {
-					return false;
+					if (!table_bounded) {
+						return false;
+					}
+					// More distinct descriptors than bindings: such keys select the first entry
+					// (a wrong texture for them instead of dropping every dispatch).
+					static std::atomic<uint32_t> reported {0};
+					if (reported.fetch_add(1, std::memory_order_relaxed) < 8u) {
+						std::printf("KYTY_INDIRECT_TABLE_IMAGES: a table has more than %u distinct "
+						            "image descriptors; the rest select its first entry\n",
+						            ShaderInfo::MaxImages);
+					}
+					snapshot.flattened_srt[mapping_offset + 1u + entry * 2u] = key;
+					snapshot.flattened_srt[mapping_offset + 2u + entry * 2u] = 0u;
+					continue;
 				}
 				snapshot.images.push_back(candidate);
 				auto child = root_image;

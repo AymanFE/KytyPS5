@@ -5,6 +5,9 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fmt/format.h>
 #include <span>
 #include <utility>
@@ -875,9 +878,23 @@ private:
 		return {};
 	}
 
+	// KYTY_INDIRECT_IMAGE_DIAG=1: which check refused an indirect image plan (source line), once per
+	// pc; the program's skip line names the shader.
+	static bool IndirectFail(uint32_t pc, int line) {
+		static const bool diag = [] {
+			const char* value = std::getenv("KYTY_INDIRECT_IMAGE_DIAG");
+			return value != nullptr && std::strcmp(value, "1") == 0;
+		}();
+		if (diag) {
+			std::printf("KYTY_INDIRECT_IMAGE_DIAG: image at pc=0x%08x refused at "
+			            "ResourceTracking.cpp:%d\n", pc, line);
+		}
+		return false;
+	}
+
 	bool TryMakeIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
 		if (handle.GetOpcode() != ValueOpcode::GetImageResource || handle.NumArgs() != 8u) {
-			return false;
+			return IndirectFail(pc, __LINE__);
 		}
 		Inst* table_handle = nullptr;
 		Value key;
@@ -885,13 +902,13 @@ private:
 		for (uint32_t dword = 0; dword < plan.reads.size(); ++dword) {
 			auto* read = handle.Arg(dword).Resolve().TryInstruction();
 			if (read == nullptr) {
-				return false;
+				return IndirectFail(pc, __LINE__);
 			}
 			uint32_t memory_index = 0;
 			const auto* memory = ScalarReadMemory(*read, memory_index);
 			if (memory == nullptr || memory->offset > INT32_MAX || (memory->offset & 3u) != 0u ||
 			    !MemoryIndexBelongsTo(memory_index, *read)) {
-				return false;
+				return IndirectFail(pc, __LINE__);
 			}
 			auto* current_handle = read->Arg(0).Resolve().TryInstruction();
 			Value current_key;
@@ -905,7 +922,7 @@ private:
 			     !EquivalentValue(m_program, Value(table_handle), Value(current_handle))) ||
 			    !MatchTableOffset(read->Arg(1), current_key, offset) ||
 			    memory->offset > UINT32_MAX - offset) {
-				return false;
+				return IndirectFail(pc, __LINE__);
 			}
 			offset += memory->offset;
 			if (dword == 0u) {
@@ -913,7 +930,7 @@ private:
 				table_offset = offset;
 			} else if (!EquivalentValue(m_program, key, current_key) ||
 			           static_cast<uint64_t>(table_offset) + dword * sizeof(uint32_t) != offset) {
-				return false;
+				return IndirectFail(pc, __LINE__);
 			}
 			table_handle = current_handle;
 			const std::array<const Inst*, 1> image_users {&handle};
@@ -935,7 +952,7 @@ private:
 					           image_users.end();
 				});
 				if ((!lod_words_only && !data_words) || dword == 0u) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				plan.memory[dword] = UINT32_MAX;
 				continue;
@@ -946,7 +963,7 @@ private:
 
 		DescriptorSource table_source;
 		if (!MakeRuntimeTableSource(*table_handle, pc, table_source)) {
-			return false;
+			return IndirectFail(pc, __LINE__);
 		}
 		DescriptorSource material_source;
 		DescriptorSource::IndirectDescriptor indirect;
@@ -963,10 +980,10 @@ private:
 			}
 			if (indirect.key_count.IsEmpty() &&
 			    !MatchUniformizedMaterialKey(key, handle, indirect, material_source, pc)) {
-				return false;
+				return IndirectFail(pc, __LINE__);
 			}
 			if ((table_offset & 3u) != 0u ||
-			    (bitscan && table_offset > UINT32_MAX - (32u * 32u - 1u))) return false;
+			    (bitscan && table_offset > UINT32_MAX - (32u * 32u - 1u))) return IndirectFail(pc, __LINE__);
 		} else {
 			// A per-material record selects the entry (the read below and its stride).
 			const auto match_material = [&]() -> bool {
@@ -979,26 +996,26 @@ private:
 				if (table_offset != 0u || memory == nullptr || memory->kind != ResourceKind::ScalarBuffer ||
 				    (memory->offset & 3u) != 0u || memory->offset > INT32_MAX ||
 				    !MemoryIndexBelongsTo(material_memory_index, *material_read)) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				Value selector;
 				DescriptorSource::IndirectDescriptor::SelectorRead selector_read;
 				if (!MatchMaterialOffset(material_read->Arg(1), selector, selector_read.stride,
 				                         selector_read.offset) ||
 				    selector_read.offset > UINT32_MAX - memory->offset) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				selector_read.offset += memory->offset;
 				const auto* shift = plan.reads[0]->Arg(1).Resolve().TryInstruction();
 				const std::array<const Inst*, 1> material_users {shift};
 				if (!UsesOnly(*material_read, material_users) || !UsesOnly(*shift, plan.reads)) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				const auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
 				if (material_handle == nullptr ||
 				    material_handle->GetOpcode() != ValueOpcode::GetBufferResource ||
 				    !MakeRuntimeTableSource(*material_handle, pc, material_source)) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				selector_read.source = InternSource(material_source);
 				indirect.selector    = selector_read;
@@ -1008,7 +1025,7 @@ private:
 				// KYTY_INDIRECT_TABLE_IMAGES: any other runtime index (a bindless key, a waterfall
 				// loop's READFIRSTLANE) takes every entry of the table as a candidate.
 				if (!m_table_images) {
-					return false;
+					return IndirectFail(pc, __LINE__);
 				}
 				material_source = {};
 				indirect.selector.reset();

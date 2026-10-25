@@ -2128,6 +2128,18 @@ struct PipelineCache::ProgramCache {
 				std::printf("Warning: stage materialization failed without a retryable read "
 				            "(#%" PRIu64 "); its draws/dispatches are dropped\n", count);
 			}
+			{
+				// Which shaders: once each.
+				static std::mutex                   mutex;
+				static std::unordered_set<uint64_t> logged;
+				const auto&                         plan = source.resource_plan;
+				std::scoped_lock                    lock(mutex);
+				if (logged.size() < 64 &&
+				    logged.insert(plan.shader_hash ^ static_cast<uint64_t>(plan.stage)).second) {
+					std::printf("Warning: stage materialization failed for %s shader 0x%016" PRIx64
+					            "\n", ProgramStageName(plan.stage), plan.shader_hash);
+				}
+			}
 			return false;
 		}
 		read_attempt.materialization_failed = true;
