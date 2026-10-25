@@ -777,6 +777,12 @@ enum class Opcode {
 	COUNT
 };
 
+// High dwords of the flat apertures (SRC_SHARED_BASE, SRC_PRIVATE_BASE); the hardware compares the
+// top 16 bits of a FLAT address with them. These are the PS5's: Saros's ray tracing shader
+// 0xb1b98482d67c466b builds its short-stack pushes with 0x80000000 (LDS) and 0x70000000 (scratch).
+inline constexpr uint32_t SHARED_APERTURE_HIGH  = 0x80000000u;
+inline constexpr uint32_t PRIVATE_APERTURE_HIGH = 0x70000000u;
+
 enum class OperandKind {
 	Unknown,
 	LiteralConstant,

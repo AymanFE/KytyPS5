@@ -3,8 +3,10 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <utility>
 
@@ -2043,6 +2045,167 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	           }));
 }
 
+namespace {
+
+// The global (BDA) part of StoreAddressBda.
+void StoreAddressBdaGlobal(ValueEmitContext& ctx, uint32_t guest, uint32_t bits, uint32_t value) {
+	auto& state = ctx.state;
+	const auto aligned = Binary(state, spv::OpBitwiseAnd, TypeU64(state), guest,
+	                            ConstantDeviceAddress(state, ~uint64_t {3}));
+	uint32_t mask    = 0;
+	uint32_t shifted = 0;
+	if (bits != 32u) {
+		const auto mask_bits = ConstantU32(state, bits == 8u ? 0xffu : 0xffffu);
+		const auto shift =
+		    Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+		           Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+		                  Unary(state, spv::OpUConvert, TypeU32(state), guest), ConstantU32(state, 3)),
+		           ConstantU32(state, 3));
+		mask    = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), mask_bits, shift);
+		shifted = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+		                 Binary(state, spv::OpBitwiseAnd, TypeU32(state), value, mask_bits), shift);
+	}
+	const BdaStoreLogValue log {bits == 32u ? value : shifted,
+	                            bits == 32u ? ConstantU32(state, ~0u) : mask};
+	(void)WriteBdaIfMapped(
+	    ctx, aligned, ConstantBool(state, true), TypeU32(state), ConstantU32(state, 0),
+	    [&](uint32_t host) {
+		    const auto pointer = state.builder.AllocateId();
+		    state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer,
+		                              host);
+		    if (bits == 32u) {
+			    constexpr uint32_t alignment = sizeof(uint32_t);
+			    state.builder.AddFunction(spv::OpStore, pointer, value, spv::MemoryAccessAlignedMask,
+			                              alignment);
+		    } else {
+			    (void)AtomicUpdate(state, pointer, IR::ResourceKind::IndirectBuffer, [&](uint32_t old) {
+				    return Binary(state, spv::OpBitwiseOr, TypeU32(state),
+				                  Binary(state, spv::OpBitwiseAnd, TypeU32(state), old,
+				                         Unary(state, spv::OpNot, TypeU32(state), mask)),
+				                  shifted);
+			    });
+		    }
+		    return ConstantU32(state, 0);
+	    },
+	    GetCodegenOptions().bda_store_log ? &log : nullptr);
+}
+
+// A FLAT (segment 0) access whose address is in the LDS or private aperture (the top 16 bits equal
+// SRC_SHARED_BASE's or SRC_PRIVATE_BASE's, ShaderDecoder.h) goes to LDS or to the lane's scratch at
+// the low dword, as on the hardware. Saros's ray tracing shader 0xb1b98482d67c466b keeps its
+// traversal short stack there: pushes are FLAT stores to 0x80000000'xxxxxxxx (LDS) or
+// 0x70000000'xxxxxxxx (scratch), pops DS_READ_B32 or a scratch FLAT_LOAD. An aperture address past
+// the low 4 GiB (bits 32-47 set) is outside every local allocation: it reaches nothing.
+struct FlatApertureRoute {
+	IR::ResourceKind kind   = IR::ResourceKind::None;
+	uint32_t         hit    = 0; // in the aperture
+	uint32_t         usable = 0; // and in its first 4 GiB
+};
+
+struct FlatApertures {
+	uint32_t                         low    = 0;
+	uint32_t                         global = 0; // in neither aperture
+	std::array<FlatApertureRoute, 2> routes {};
+	uint32_t                         count = 0;
+};
+
+// The apertures this program can reach (LDS and scratch it declares); count 0 for a non-FLAT access.
+FlatApertures FlatApertureRoutes(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t guest) {
+	auto&         state = ctx.state;
+	FlatApertures result;
+	if (mem.kind != IR::ResourceKind::Flat) {
+		return result;
+	}
+	result.low        = Unary(state, spv::OpUConvert, TypeU32(state), guest);
+	const auto high   = Unary(state, spv::OpUConvert, TypeU32(state),
+	                          Binary(state, spv::OpShiftRightLogical, TypeU64(state), guest,
+	                                 ConstantDeviceAddress(state, 32)));
+	const auto top    = Binary(state, spv::OpShiftRightLogical, TypeU32(state), high,
+	                           ConstantU32(state, 16));
+	const auto inside = Binary(state, spv::OpIEqual, TypeBool(state),
+	                           Binary(state, spv::OpBitwiseAnd, TypeU32(state), high,
+	                                  ConstantU32(state, 0xffffu)),
+	                           ConstantU32(state, 0));
+	result.global     = ConstantBool(state, true);
+	const auto add    = [&](IR::ResourceKind kind, uint32_t aperture_high) {
+		const auto hit = Binary(state, spv::OpIEqual, TypeBool(state), top,
+		                        ConstantU32(state, aperture_high >> 16u));
+		result.routes[result.count++] = {kind, hit, AndCondition(state, hit, inside)};
+		result.global =
+		    AndCondition(state, result.global, Unary(state, spv::OpLogicalNot, TypeBool(state), hit));
+	};
+	if (state.lds_storage_class != spv::StorageClassFunction) {
+		add(IR::ResourceKind::Lds, Decoder::SHARED_APERTURE_HIGH);
+	}
+	if (state.scratch_variable[state.lane_half] != 0) {
+		add(IR::ResourceKind::Scratch, Decoder::PRIVATE_APERTURE_HIGH);
+	}
+	return result;
+}
+
+MemoryResourceAccess FlatApertureResource(EmitterState& state, const IR::MemoryInfo& mem,
+                                          IR::ResourceKind kind, IR::MemoryInfo& target) {
+	target      = mem;
+	target.kind = kind;
+	return PrepareMemoryResourceAccess(state, target);
+}
+
+void StoreFlatAperture(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const FlatApertures& flat,
+                       const FlatApertureRoute& route, uint32_t bits, uint32_t value) {
+	auto& state = ctx.state;
+	EmitIfCondition(state, route.usable, [&]() {
+		IR::MemoryInfo target;
+		const auto     resource = FlatApertureResource(state, mem, route.kind, target);
+		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), flat.low,
+		                          ConstantU32(state, 2));
+		EmitIfCondition(state, EmitMemoryElementInBounds(state, resource, index), [&]() {
+			if (bits == 32u) {
+				StoreWordInBounds(ctx, resource, index, value);
+			} else {
+				StoreSubwordInBounds(ctx, target, resource, flat.low, index, bits, value);
+			}
+		});
+	});
+}
+
+uint32_t LoadFlatAperture(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
+                          const FlatApertures& flat, const FlatApertureRoute& route,
+                          uint32_t active, uint32_t bits) {
+	auto& state = ctx.state;
+	return EmitValueOrZeroIfCondition(state, AndCondition(state, active, route.usable), [&]() {
+		IR::MemoryInfo target;
+		const auto     resource = FlatApertureResource(state, mem, route.kind, target);
+		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), flat.low,
+		                          ConstantU32(state, 2));
+		return EmitValueOrZeroIfCondition(
+		    state, EmitMemoryElementInBounds(state, resource, index), [&]() {
+			    return bits == 32u ? LoadWordInBounds(ctx, resource, index)
+			                       : LoadSubwordInBounds(ctx, resource, flat.low, index, bits, false);
+		    });
+	});
+}
+
+// A FLAT/GLOBAL load through BDA, or from LDS or scratch through a FLAT aperture.
+uint32_t LoadAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                     uint32_t bits) {
+	auto&      state  = ctx.state;
+	const auto guest  = GuestAddress(ctx, inst, mem);
+	const auto active = ctx.Arg(inst, inst.NumArgs() - 1);
+	const auto flat   = FlatApertureRoutes(ctx, mem, guest);
+	if (flat.count == 0) {
+		return LoadBda(ctx, guest, active, bits, mem.coherent);
+	}
+	auto value = LoadBda(ctx, guest, AndCondition(state, active, flat.global), bits, mem.coherent);
+	for (uint32_t i = 0; i < flat.count; i++) {
+		const auto& route = flat.routes[i];
+		value = Select(state, TypeU32(state), route.hit,
+		               LoadFlatAperture(ctx, mem, flat, route, active, bits), value);
+	}
+	return value;
+}
+
+} // namespace
+
 void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  op  = inst.GetOpcode();
 	const auto& mem = ctx.Memory(inst);
@@ -2067,8 +2230,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
 	else if (address_info.access == IR::AddressAccess::Read &&
 	         mem.kind != IR::ResourceKind::Scratch)
-		value = LoadBda(ctx, GuestAddress(ctx, inst, mem), ctx.Arg(inst, inst.NumArgs() - 1),
-		                address_info.data_bits, mem.coherent);
+		value = LoadAddress(ctx, inst, mem, address_info.data_bits);
 	else if (op == IR::ValueOpcode::LoadBufferU32 && mem.formatted)
 		value = mem.kind == IR::ResourceKind::IndirectBuffer ? LoadIndirectFormattedX(ctx, inst)
 		                                                     : FormattedLoad(ctx, inst, mem);
@@ -2090,44 +2252,15 @@ void StoreAddressBda(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Memo
 	EmitIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto value   = ctx.Arg(inst, inst.NumArgs() - 2);
 		const auto guest   = GuestAddress(ctx, inst, mem);
-		const auto aligned = Binary(state, spv::OpBitwiseAnd, TypeU64(state), guest,
-		                            ConstantDeviceAddress(state, ~uint64_t {3}));
-		uint32_t mask    = 0;
-		uint32_t shifted = 0;
-		if (bits != 32u) {
-			const auto mask_bits = ConstantU32(state, bits == 8u ? 0xffu : 0xffffu);
-			const auto shift =
-			    Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
-			           Binary(state, spv::OpBitwiseAnd, TypeU32(state),
-			                  Unary(state, spv::OpUConvert, TypeU32(state), guest), ConstantU32(state, 3)),
-			           ConstantU32(state, 3));
-			mask    = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), mask_bits, shift);
-			shifted = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
-			                 Binary(state, spv::OpBitwiseAnd, TypeU32(state), value, mask_bits), shift);
+		const auto flat    = FlatApertureRoutes(ctx, mem, guest);
+		if (flat.count == 0) {
+			StoreAddressBdaGlobal(ctx, guest, bits, value);
+			return;
 		}
-		const BdaStoreLogValue log {bits == 32u ? value : shifted,
-		                            bits == 32u ? ConstantU32(state, ~0u) : mask};
-		(void)WriteBdaIfMapped(
-		    ctx, aligned, ConstantBool(state, true), TypeU32(state), ConstantU32(state, 0),
-		    [&](uint32_t host) {
-			    const auto pointer = state.builder.AllocateId();
-			    state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer,
-			                              host);
-			    if (bits == 32u) {
-				    constexpr uint32_t alignment = sizeof(uint32_t);
-				    state.builder.AddFunction(spv::OpStore, pointer, value, spv::MemoryAccessAlignedMask,
-				                              alignment);
-			    } else {
-				    (void)AtomicUpdate(state, pointer, IR::ResourceKind::IndirectBuffer, [&](uint32_t old) {
-					    return Binary(state, spv::OpBitwiseOr, TypeU32(state),
-					                  Binary(state, spv::OpBitwiseAnd, TypeU32(state), old,
-					                         Unary(state, spv::OpNot, TypeU32(state), mask)),
-					                  shifted);
-				    });
-			    }
-			    return ConstantU32(state, 0);
-		    },
-		    GetCodegenOptions().bda_store_log ? &log : nullptr);
+		for (uint32_t i = 0; i < flat.count; i++) {
+			StoreFlatAperture(ctx, mem, flat, flat.routes[i], bits, value);
+		}
+		EmitIfCondition(state, flat.global, [&]() { StoreAddressBdaGlobal(ctx, guest, bits, value); });
 	});
 }
 

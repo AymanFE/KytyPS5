@@ -276,11 +276,13 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 		case 236u:
 		case 237u:
 		case 238u:
-			// The flat apertures of the gfx9+ default SH_MEM_BASES: LDS at 1 << 48, scratch at 2 << 48.
-			// A generic pointer built from them is outside the 40-bit guest address space.
+			// The flat apertures (high dwords, ShaderDecoder.h): a generic pointer built from them is
+			// outside the 40-bit guest address space, and FLAT stores route it to LDS or scratch.
+			// A limit's high dword ends its 2^48-byte aperture.
 			operand.kind  = OperandKind::Aperture;
 			operand.reg   = code;
-			operand.value = code <= 236u ? 0x00010000u : 0x00020000u;
+			operand.value = (code <= 236u ? SHARED_APERTURE_HIGH : PRIVATE_APERTURE_HIGH) |
+			                ((code == 236u || code == 238u) ? 0xffffu : 0u);
 			return;
 		case 239u: operand.kind = OperandKind::PopsExitingWaveId; return;
 		case 248u:
