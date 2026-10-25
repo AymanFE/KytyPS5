@@ -133,7 +133,13 @@ static int KYTY_SYSV_ABI PadOpenExtStub(int user_id, int type, int index, const 
 	     "\t param   = 0x%016" PRIx64 "\n",
 	     user_id, type, index, reinterpret_cast<uint64_t>(param));
 
-	return OK;
+	// Returning OK handed the game handle 0, which is never valid, so every read on it failed.
+	// Open the same port scePadOpen does; a port scePadOpen already opened keeps its handle.
+	const int handle = Controller::PadOpen(user_id, type, index, param);
+	if (handle == Controller::PAD_ERROR_ALREADY_OPENED) {
+		return Controller::PadGetHandle(user_id, type, index);
+	}
+	return handle;
 }
 
 // PPSA02385
