@@ -924,17 +924,23 @@ bool DecodeGuestLoad(void* native_context, uint64_t fault_vaddr, GuestLoad::Load
 	}
 	const bool     vex        = instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX;
 	const auto     reg_class  = ZydisRegisterGetClass(dest.reg.value);
-	const auto     index      = ZydisRegisterGetId(dest.reg.value);
+	auto           index      = ZydisRegisterGetId(dest.reg.value);
 	const uint32_t mem_bytes  = source.size / 8u;
 	const uint32_t dest_bytes = dest.size / 8u;
 	const bool     gpr        = reg_class == ZYDIS_REGCLASS_GPR8 || reg_class == ZYDIS_REGCLASS_GPR16 ||
 	                 reg_class == ZYDIS_REGCLASS_GPR32 || reg_class == ZYDIS_REGCLASS_GPR64;
-	if (index < 0 || index >= 16 || mem_bytes == 0 || mem_bytes > 16) {
-		return false;
-	}
 	// The high-byte registers (AH, CH, DH, BH) are not the low byte of their register index.
 	if (dest.reg.value == ZYDIS_REGISTER_AH || dest.reg.value == ZYDIS_REGISTER_CH ||
 	    dest.reg.value == ZYDIS_REGISTER_DH || dest.reg.value == ZYDIS_REGISTER_BH) {
+		return false;
+	}
+	// Zydis numbers the 8-bit registers AL, CL, DL, BL, AH, CH, DH, BH, SPL, BPL, SIL, DIL, R8B..:
+	// SPL is id 8 and R8B id 12, so every id past the high-byte registers is 4 above the GPR's.
+	// (Using it directly wrote MOV SIL, [m] to R10 and MOV R8B, [m] to R12.)
+	if (reg_class == ZYDIS_REGCLASS_GPR8 && index >= 8) {
+		index -= 4;
+	}
+	if (index < 0 || index >= 16 || mem_bytes == 0 || mem_bytes > 16) {
 		return false;
 	}
 	uint8_t kind = 0;
