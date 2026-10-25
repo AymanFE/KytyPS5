@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -730,11 +731,9 @@ uint32_t Image::CopyRows(uint64_t row_size, uint32_t rows, uint64_t capacity) no
 	return static_cast<uint32_t>(std::min<uint64_t>(rows, capacity / row_size));
 }
 
-void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler) {
+bool Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler) {
 	KYTY_GPU_OP_SITE("image.copy_via_buffer");
-	NoteContentWrite();
 	EXIT_IF(buffer.Handle() == nullptr || source.backing.samples != 1 || backing.samples != 1);
-	m_scheduler.EndRendering();
 	const uint32_t levels = std::min(source.backing.mip_levels, backing.mip_levels);
 	const auto     source_aspect =
 	    FullAspectMask(source.backing.format) & ~vk::ImageAspectFlagBits::eStencil;
@@ -748,8 +747,25 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 	                                       : info.bytes_per_block;
 	const uint32_t source_block      = source.info.IsBlock() ? 4u : 1u;
 	const uint32_t destination_block = info.IsBlock() ? 4u : 1u;
-	EXIT_IF(levels == 0 || source_bytes == 0 || source_bytes != destination_bytes ||
-	        source_block != destination_block);
+	// Texels of different sizes (Saros, after its ray tracing starts) cannot be copied texel for
+	// texel: the copy is skipped and the caller keeps the destination's own contents.
+	if (levels == 0 || source_bytes == 0 || source_bytes != destination_bytes ||
+	    source_block != destination_block) {
+		static std::atomic<uint32_t> noted {0};
+		if (noted.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::printf("Image copy skipped: format %u (%u bytes, block %u) to format %u (%u bytes, "
+			            "block %u), %ux%u at 0x%" PRIx64 "\n",
+			            static_cast<uint32_t>(source.backing.format), static_cast<uint32_t>(source_bytes),
+			            source_block, static_cast<uint32_t>(backing.format),
+			            static_cast<uint32_t>(destination_bytes), destination_block,
+			            static_cast<uint32_t>(info.extent.width), static_cast<uint32_t>(info.extent.height),
+			            static_cast<uint64_t>(info.data.address));
+			std::fflush(stdout);
+		}
+		return false;
+	}
+	NoteContentWrite();
+	m_scheduler.EndRendering();
 	const auto source_transform = source.info.GetColorTransform();
 	const auto target_transform = info.GetColorTransform();
 
@@ -870,6 +886,7 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 	flush_round();
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command.Identity());
+	return true;
 }
 
 void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {

@@ -119,7 +119,8 @@ public:
 	void CopyDepthColorImage(Image& source);
 	void Resolve(Image& source, const ImageSubresourceRange& source_range,
 	             const ImageSubresourceRange& destination_range);
-	void CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler);
+	// False (nothing copied) when the formats' texel sizes differ.
+	bool CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler);
 	void CopyMip(Image& source, uint32_t mip, uint32_t layer);
 
 	// Native contents identity. Every recorded write to this image gives it a fresh serial

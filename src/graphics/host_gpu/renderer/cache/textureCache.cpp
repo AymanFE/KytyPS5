@@ -2109,7 +2109,10 @@ bool TextureCache::CopyImage(ImageId destination_id, ImageId source_id, const ch
 			EXIT("TextureCache: cross-format multisample image copy is unsupported\n");
 		}
 		auto& copy_buffer = m_buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
-		destination.CopyImageWithBuffer(source, copy_buffer, m_tiler);
+		if (!destination.CopyImageWithBuffer(source, copy_buffer, m_tiler)) {
+			// Texel sizes differ: nothing was copied, and the destination keeps its contents.
+			return false;
+		}
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ImageCopyViaBuffer);
 		path = "via-buffer";
 	}
