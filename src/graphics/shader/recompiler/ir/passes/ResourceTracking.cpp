@@ -1316,6 +1316,13 @@ private:
 			}
 			ValidateAddressHandle(inst.Arg(0), flags.pc);
 			if (address_info.access == AddressAccess::Write) {
+				// KYTY_BDA_WRITES: a FLAT/GLOBAL store writes through BDA as a raw store through a
+				// computed V# does (compute only: each dispatch is settled synchronously). Saros's
+				// ray tracing shader 0xb1b98482d67c466b stores through GLOBAL addresses.
+				if (!m_bda_writes || m_program.stage != ShaderType::Compute) {
+					Fail(flags.pc, "writable FLAT/GLOBAL addresses require KYTY_BDA_WRITES in a compute shader");
+				}
+				m_info.bda_writes            = true;
 				m_program.has_address_writes = true;
 			}
 			m_info.uses_dma = true;

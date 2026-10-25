@@ -341,7 +341,11 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					}
 					requirements.function_scratch = true;
 				} else if (address_access == IR::AddressAccess::Write) {
-					Fail(program, "writable FLAT/GLOBAL addresses require GPU ownership tracking");
+					// Written through BDA with the KYTY_BDA_WRITES page tracking (StoreAddressBda).
+					if (!program.info.bda_writes) {
+						Fail(program, "writable FLAT/GLOBAL addresses require GPU ownership tracking");
+					}
+					requirements.subgroup_local_invocation_id = true;
 				} else {
 					// Descriptor stores can alias coherent physical-address loads.
 					requirements.coherent_buffers |= memory.coherent;

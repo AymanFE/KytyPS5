@@ -91,9 +91,8 @@ public:
 	static constexpr uint64_t BDA_WRITE_BITMAP_WORD   = FAULT_BITMAP_WORDS;
 	static constexpr uint64_t BDA_DROPPED_WRITES_WORD = 2 * FAULT_BITMAP_WORDS;
 	static constexpr uint64_t BDA_STORE_LOG_WORD      = BDA_DROPPED_WRITES_WORD + 4;
-	// Saros's BVH clear and build (CS 0xb9da5e64f4c5b10a, 0x26ea14a341c67c0f) log 9216 and over
-	// 31000 entries per dispatch when their node buffer has no cache buffer yet.
-	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 65536;
+	// Saros's BVH clear and build (CS 0xb9da5e64f4c5b10a, 0x26ea14a341c67c0f) log about 74000 entries per dispatch when their node buffer has no cache buffer yet.
+	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 262144;
 	// KYTY_BDA_STORE_LOG: an entry's operation, in the top byte of its address-high word (guest
 	// addresses are 40-bit). Store replaces the masked bits of the dword; the others are a 32-bit
 	// BUFFER_ATOMIC_* whose old value the shader does not read (GLC=0), which the settle applies to

@@ -2081,13 +2081,66 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	ctx.Define(inst, value);
 }
 
+// KYTY_BDA_WRITES: a FLAT/GLOBAL STORE_BYTE/SHORT/DWORD. The address goes through BDA as a raw store
+// through a computed V# does: a byte or short replaces its bits of the containing dword atomically,
+// and a store to a page without a cache buffer is logged (KYTY_BDA_STORE_LOG) or dropped.
+void StoreAddressBda(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                     uint32_t bits) {
+	auto& state = ctx.state;
+	EmitIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+		const auto value   = ctx.Arg(inst, inst.NumArgs() - 2);
+		const auto guest   = GuestAddress(ctx, inst, mem);
+		const auto aligned = Binary(state, spv::OpBitwiseAnd, TypeU64(state), guest,
+		                            ConstantDeviceAddress(state, ~uint64_t {3}));
+		uint32_t mask    = 0;
+		uint32_t shifted = 0;
+		if (bits != 32u) {
+			const auto mask_bits = ConstantU32(state, bits == 8u ? 0xffu : 0xffffu);
+			const auto shift =
+			    Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+			           Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+			                  Unary(state, spv::OpUConvert, TypeU32(state), guest), ConstantU32(state, 3)),
+			           ConstantU32(state, 3));
+			mask    = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), mask_bits, shift);
+			shifted = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+			                 Binary(state, spv::OpBitwiseAnd, TypeU32(state), value, mask_bits), shift);
+		}
+		const BdaStoreLogValue log {bits == 32u ? value : shifted,
+		                            bits == 32u ? ConstantU32(state, ~0u) : mask};
+		(void)WriteBdaIfMapped(
+		    ctx, aligned, ConstantBool(state, true), TypeU32(state), ConstantU32(state, 0),
+		    [&](uint32_t host) {
+			    const auto pointer = state.builder.AllocateId();
+			    state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer,
+			                              host);
+			    if (bits == 32u) {
+				    constexpr uint32_t alignment = sizeof(uint32_t);
+				    state.builder.AddFunction(spv::OpStore, pointer, value, spv::MemoryAccessAlignedMask,
+				                              alignment);
+			    } else {
+				    (void)AtomicUpdate(state, pointer, IR::ResourceKind::IndirectBuffer, [&](uint32_t old) {
+					    return Binary(state, spv::OpBitwiseOr, TypeU32(state),
+					                  Binary(state, spv::OpBitwiseAnd, TypeU32(state), old,
+					                         Unary(state, spv::OpNot, TypeU32(state), mask)),
+					                  shifted);
+				    });
+			    }
+			    return ConstantU32(state, 0);
+		    },
+		    GetCodegenOptions().bda_store_log ? &log : nullptr);
+	});
+}
+
 void EmitStoreMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  op                = inst.GetOpcode();
 	const auto& mem               = ctx.Memory(inst);
 	const auto  buffer_components = IR::BufferComponentCount(op);
 	const auto  shared_components = IR::SharedComponentCount(op);
 	const auto  type              = inst.Arg(inst.NumArgs() - 2).GetType();
-	if (buffer_components != 0u && mem.kind == IR::ResourceKind::IndirectBuffer)
+	const auto  address_info      = IR::AddressOpcodeInfoOf(op);
+	if (address_info.access == IR::AddressAccess::Write && mem.kind != IR::ResourceKind::Scratch)
+		StoreAddressBda(ctx, inst, mem, address_info.data_bits);
+	else if (buffer_components != 0u && mem.kind == IR::ResourceKind::IndirectBuffer)
 		StoreIndirectBuffer(ctx, inst, buffer_components,
 		                    type == IR::Type::U8 ? 8u : type == IR::Type::U16 ? 16u : 32u);
 	else if (buffer_components > 1u)
