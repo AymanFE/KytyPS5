@@ -296,6 +296,27 @@ private:
 		descriptor.dword_count = width;
 		for (uint32_t i = 0; i < width; i++) {
 			descriptor.dwords[i] = LowerDescriptorPhi(handle.Arg(i), handle.Parent());
+			// KYTY_SAMPLER_PHI_MAX (default on): an S# word that merges only immediates along
+			// paths no runtime value selects (Saros CS 0x905b2e2c09c61a5d: dword 1, its LOD clamp,
+			// is S_BFM 12,12 on one path) takes the larger one, which clamps least.
+			static const bool sampler_phi_max = [] {
+				const char* value = std::getenv("KYTY_SAMPLER_PHI_MAX");
+				return value == nullptr || std::strcmp(value, "0") != 0;
+			}();
+			const auto* phi = descriptor.dwords[i].Resolve().TryInstruction();
+			if (sampler && sampler_phi_max && phi != nullptr &&
+			    phi->GetOpcode() == ValueOpcode::Phi && phi->NumArgs() != 0u) {
+				uint32_t largest = 0;
+				bool     constant = true;
+				for (size_t arg = 0; arg < phi->NumArgs() && constant; ++arg) {
+					const auto input = phi->Arg(arg).Resolve();
+					constant = input.IsImmediate() && input.GetType() == Type::U32;
+					largest  = constant ? std::max(largest, input.U32()) : largest;
+				}
+				if (constant) {
+					descriptor.dwords[i] = Value(largest);
+				}
+			}
 		}
 		if (sample_adjust) {
 			descriptor.dwords[3] = CanonicalizeSampleAdjustDword3(descriptor.dwords[3]);
@@ -972,7 +993,21 @@ private:
 			}
 			table_handle = current_handle;
 			const std::array<const Inst*, 1> image_users {&handle};
-			if (!UsesOnly(*read, image_users)) {
+			// Another image operation on the same T# has its own handle with the same words (Saros
+			// CS 0x97ee21b58604dbce loads one bindless volume twice): it is planned the same way.
+			const auto twin_handle = [&](const Inst* user) {
+				if (user == &handle || user->GetOpcode() != handle.GetOpcode() ||
+				    user->NumArgs() != handle.NumArgs()) {
+					return user == &handle;
+				}
+				for (size_t arg = 0; arg < handle.NumArgs(); ++arg) {
+					if (user->Arg(arg).Resolve() != handle.Arg(arg).Resolve()) {
+						return false;
+					}
+				}
+				return true;
+			};
+			if (!std::ranges::all_of(read->Uses(), [&](const Use& use) { return twin_handle(use.user); })) {
 				// A T# word the shader also uses as a value stays a real read through the table;
 				// only the handle's own uses are planned. An explicit-LOD gather passes words 1 and
 				// 3 by value (its mip selection reads them on the GPU, Translator::IMAGE_GATHER:
