@@ -34,6 +34,9 @@ Live::Switch g_buffer_refresh_fusion("KYTY_BUFFER_REFRESH_FUSION", Live::ParseDe
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 constexpr uint64_t MaxIndirectImageProbes = 65536u;
+// KYTY_INDIRECT_TABLE_IMAGES: the table entries a table-bounded image enumerates (each one costs a
+// table read per dispatch and two words of key mapping). Keys past them select the first entry.
+constexpr uint64_t MaxTableBoundedKeys = 4096u;
 
 bool SpecializationFail(std::string_view message) {
 	// A draw whose descriptors cannot be specialized fails again on every frame; each distinct
@@ -462,14 +465,29 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 	if (!indirect.selector) {
 		uint32_t key_count = 0;
 		const bool evaluated = clean.Evaluate(indirect.key_count, key_count);
-		if (std::bit_cast<int32_t>(key_count) <= 0) key_count = 0;
-		if (table_value.dword_count != 2u || !evaluated ||
-		    key_count > MaxIndirectImageProbes ||
-		    uint64_t {indirect.table_offset} + uint64_t {key_count} * 32u > UINT32_MAX + 1ull) {
-			return false;
+		if (evaluated && key_count == DescriptorSource::IndirectDescriptor::TableBoundedKeys) {
+			// KYTY_INDIRECT_TABLE_IMAGES: every entry the table's V# covers (scalar buffer loads
+			// past num_records read zeros, a null T#).
+			if (table_value.dword_count != 4u || indirect.table_offset >= table_size) {
+				return false;
+			}
+			const auto entries = std::min<uint64_t>((table_size - indirect.table_offset) / 32u,
+			                                        MaxTableBoundedKeys);
+			if (entries == 0u) {
+				return false;
+			}
+			keys.resize(static_cast<size_t>(entries));
+			std::iota(keys.begin(), keys.end(), 0u);
+		} else {
+			if (std::bit_cast<int32_t>(key_count) <= 0) key_count = 0;
+			if (table_value.dword_count != 2u || !evaluated ||
+			    key_count > MaxIndirectImageProbes ||
+			    uint64_t {indirect.table_offset} + uint64_t {key_count} * 32u > UINT32_MAX + 1ull) {
+				return false;
+			}
+			keys.resize(key_count);
+			std::iota(keys.begin(), keys.end(), 0u);
 		}
-		keys.resize(key_count);
-		std::iota(keys.begin(), keys.end(), 0u);
 	} else if (!indirect.selector_mask.IsEmpty()) {
 		uint32_t mask = 0;
 		uint32_t count = 0;

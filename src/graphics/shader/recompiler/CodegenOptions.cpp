@@ -77,6 +77,8 @@ CodegenOptions FromEnvironment() {
 		}
 	}
 	options.srt_variant_reads = EnvFlag("KYTY_SRT_VARIANT_READS", options.srt_variant_reads);
+	options.indirect_table_images =
+	    EnvFlag("KYTY_INDIRECT_TABLE_IMAGES", options.indirect_table_images);
 	options.realtime_clock    = EnvFlag("KYTY_REALTIME_CLOCK", options.realtime_clock);
 	options.dpp_skip_inactive = EnvFlag("KYTY_DPP_SKIP_INACTIVE", options.dpp_skip_inactive);
 	options.lane_reductions   = EnvFlag("KYTY_LANE_REDUCTIONS", options.lane_reductions);

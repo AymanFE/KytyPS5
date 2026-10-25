@@ -632,6 +632,9 @@ struct DescriptorSource {
 		uint32_t table_record_bytes = 0;
 		bool     table_scalar = false;
 		uint32_t workgroup_axis  = UINT32_MAX;
+		// key_count == TableBoundedKeys (an immediate): the keys are every 32-byte entry of the
+		// V# table from table_offset to its end (KYTY_INDIRECT_TABLE_IMAGES).
+		static constexpr uint32_t TableBoundedKeys = UINT32_MAX;
 		Value    key_count;
 		Value                 selector_first;
 		Value    selector_mask;

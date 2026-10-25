@@ -13,8 +13,10 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 // failing; the caller then drops the program. Returns UINT32_MAX when every descriptor resolved.
 // bda_writes (KYTY_BDA_WRITES): a raw store or atomic through such a V# in a compute program
 // writes through BDA as well (ShaderInfo::bda_writes).
+// table_images (KYTY_INDIRECT_TABLE_IMAGES): an image T# read from a V# table at an unbounded
+// runtime index takes every entry of the table as a candidate (IndirectDescriptor::TableBoundedKeys).
 uint32_t TrackResources(Program& program, bool indirect_scalar_buffers = false,
-                        bool bda_writes = false);
+                        bool bda_writes = false, bool table_images = false);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

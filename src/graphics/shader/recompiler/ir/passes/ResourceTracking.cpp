@@ -84,9 +84,10 @@ uint32_t ByteExtent(const MemoryInfo& memory) {
 
 class Tracker {
 public:
-	Tracker(Program& program, bool indirect_scalar_buffers, bool bda_writes)
+	Tracker(Program& program, bool indirect_scalar_buffers, bool bda_writes, bool table_images)
 	    : m_program(program), m_info(program.info),
-	      m_indirect_scalar_buffers(indirect_scalar_buffers), m_bda_writes(bda_writes) {
+	      m_indirect_scalar_buffers(indirect_scalar_buffers), m_bda_writes(bda_writes),
+	      m_table_images(table_images) {
 		m_info.buffers.clear();
 		m_info.images.clear();
 		m_info.samplers.clear();
@@ -967,38 +968,52 @@ private:
 			if ((table_offset & 3u) != 0u ||
 			    (bitscan && table_offset > UINT32_MAX - (32u * 32u - 1u))) return false;
 		} else {
-			auto* material_read = key.Resolve().TryInstruction();
-			uint32_t material_memory_index = 0;
-			const auto* memory = material_read != nullptr
-			                         ? ScalarReadMemory(*material_read, material_memory_index) : nullptr;
-			// The record read may carry its own immediate offset (S_BUFFER_LOAD offset=4 reads the
-			// second dword of a per-material record): it adds to the selector offset.
-			if (table_offset != 0u || memory == nullptr || memory->kind != ResourceKind::ScalarBuffer ||
-			    (memory->offset & 3u) != 0u || memory->offset > INT32_MAX ||
-			    !MemoryIndexBelongsTo(material_memory_index, *material_read)) {
-				return false;
+			// A per-material record selects the entry (the read below and its stride).
+			const auto match_material = [&]() -> bool {
+				auto* material_read = key.Resolve().TryInstruction();
+				uint32_t material_memory_index = 0;
+				const auto* memory = material_read != nullptr
+				                         ? ScalarReadMemory(*material_read, material_memory_index) : nullptr;
+				// The record read may carry its own immediate offset (S_BUFFER_LOAD offset=4 reads the
+				// second dword of a per-material record): it adds to the selector offset.
+				if (table_offset != 0u || memory == nullptr || memory->kind != ResourceKind::ScalarBuffer ||
+				    (memory->offset & 3u) != 0u || memory->offset > INT32_MAX ||
+				    !MemoryIndexBelongsTo(material_memory_index, *material_read)) {
+					return false;
+				}
+				Value selector;
+				DescriptorSource::IndirectDescriptor::SelectorRead selector_read;
+				if (!MatchMaterialOffset(material_read->Arg(1), selector, selector_read.stride,
+				                         selector_read.offset) ||
+				    selector_read.offset > UINT32_MAX - memory->offset) {
+					return false;
+				}
+				selector_read.offset += memory->offset;
+				const auto* shift = plan.reads[0]->Arg(1).Resolve().TryInstruction();
+				const std::array<const Inst*, 1> material_users {shift};
+				if (!UsesOnly(*material_read, material_users) || !UsesOnly(*shift, plan.reads)) {
+					return false;
+				}
+				const auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
+				if (material_handle == nullptr ||
+				    material_handle->GetOpcode() != ValueOpcode::GetBufferResource ||
+				    !MakeRuntimeTableSource(*material_handle, pc, material_source)) {
+					return false;
+				}
+				selector_read.source = InternSource(material_source);
+				indirect.selector    = selector_read;
+				return true;
+			};
+			if (!match_material()) {
+				// KYTY_INDIRECT_TABLE_IMAGES: any other runtime index (a bindless key, a waterfall
+				// loop's READFIRSTLANE) takes every entry of the table as a candidate.
+				if (!m_table_images) {
+					return false;
+				}
+				material_source = {};
+				indirect.selector.reset();
+				indirect.key_count = Value(DescriptorSource::IndirectDescriptor::TableBoundedKeys);
 			}
-			Value selector;
-			DescriptorSource::IndirectDescriptor::SelectorRead selector_read;
-			if (!MatchMaterialOffset(material_read->Arg(1), selector, selector_read.stride,
-			                         selector_read.offset) ||
-			    selector_read.offset > UINT32_MAX - memory->offset) {
-				return false;
-			}
-			selector_read.offset += memory->offset;
-			const auto* shift = plan.reads[0]->Arg(1).Resolve().TryInstruction();
-			const std::array<const Inst*, 1> material_users {shift};
-			if (!UsesOnly(*material_read, material_users) || !UsesOnly(*shift, plan.reads)) {
-				return false;
-			}
-			const auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
-			if (material_handle == nullptr ||
-			    material_handle->GetOpcode() != ValueOpcode::GetBufferResource ||
-			    !MakeRuntimeTableSource(*material_handle, pc, material_source)) {
-				return false;
-			}
-			selector_read.source = InternSource(material_source);
-			indirect.selector    = selector_read;
 		}
 		indirect.table_source = InternSource(table_source);
 		DescriptorSource image_source;
@@ -1411,6 +1426,7 @@ private:
 	bool                                       m_shader_writes = false;
 	bool                                       m_indirect_scalar_buffers = false;
 	bool                                       m_bda_writes              = false;
+	bool                                       m_table_images            = false;
 	uint32_t                                   m_unresolved_pc = UINT32_MAX;
 
 public:
@@ -1424,8 +1440,9 @@ public:
 
 } // namespace
 
-uint32_t TrackResources(Program& program, bool indirect_scalar_buffers, bool bda_writes) {
-	Tracker tracker(program, indirect_scalar_buffers, bda_writes);
+uint32_t TrackResources(Program& program, bool indirect_scalar_buffers, bool bda_writes,
+                        bool table_images) {
+	Tracker tracker(program, indirect_scalar_buffers, bda_writes, table_images);
 	tracker.Run();
 	return tracker.UnresolvedPc();
 }

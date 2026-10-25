@@ -245,6 +245,14 @@ struct CodegenOptions {
 	// deferred-lighting and GI kernels are dropped, and with the game's lighting patches off lit
 	// geometry renders black. KYTY_SRT_VARIANT_READS=0 restores the old planning.
 	bool srt_variant_reads = true;
+	// KYTY_INDIRECT_TABLE_IMAGES (default 1, with srt_variant_reads): an image whose T# the shader
+	// reads from a V# table at a runtime index (S_BUFFER_LOAD_DWORDX8 at key * 32, bindless style)
+	// and whose index has no bound the tracker can prove binds every entry the table's descriptor
+	// covers (num_records / 32, at most MaxIndirectImageProbes) as the candidates of that image,
+	// instead of dropping the program. Saros' GI/fog volume passes (CS 0x9fba2edffc549531,
+	// 0x97ee21b58604dbce, ...) and a bindless waterfall PS (0x2be7cda6416b3708) were dropped
+	// without it, and the world rendered without indirect lighting. 0 restores the refusal.
+	bool indirect_table_images = true;
 	// KYTY_NATIVE_INDIRECT_MESH=1|on|verify|exit: mesh draw dword 3 equal to
 	// IR::PushData::MeshIndirectSentinel makes mesh shaders read their six draw dwords from the
 	// parameter block at the device address in dwords 0-1 (a GPU-converted indirect mesh draw,
