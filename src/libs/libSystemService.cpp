@@ -12,6 +12,8 @@
 #include "libs/systemService.h"
 #include "loader/symbolDatabase.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -195,6 +197,18 @@ static int KYTY_SYSV_ABI SystemServiceGetStatus(SystemServiceStatus* status) {
 	{
 		std::scoped_lock lock(g_event_mutex);
 		status->event_num = static_cast<int32_t>(g_events.size());
+	}
+	// KYTY_PAD_TRACE=1 also prints each change of the status games gate their input on.
+	if (const char* trace = std::getenv("KYTY_PAD_TRACE"); trace != nullptr && trace[0] == '1') {
+		static int last = -1;
+		const int  now  = (status->is_system_ui_overlaid ? 1 : 0) | (status->is_in_background_execution ? 2 : 0) |
+		                (status->event_num > 0 ? 4 : 0);
+		if (now != last) {
+			std::printf("Pad trace: SystemServiceGetStatus overlaid %d background %d events %d\n",
+			            status->is_system_ui_overlaid ? 1 : 0, status->is_in_background_execution ? 1 : 0,
+			            status->event_num);
+			last = now;
+		}
 	}
 
 	return OK;

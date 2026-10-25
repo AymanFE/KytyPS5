@@ -24,6 +24,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace Libs::Controller {
@@ -467,6 +469,57 @@ void GetTriggerEffectState(int32_t* state) {
 	g_players[0]->GetTriggerEffectState(state);
 }
 
+// KYTY_AUTO_PAD="25:cross,33:right,41:options" presses player 1's buttons at the given seconds after
+// start (held 150 ms), as the keyboard would, for unattended test runs.
+static void StartAutoPad() {
+	const char* value = std::getenv("KYTY_AUTO_PAD");
+	if (value == nullptr || *value == '\0') {
+		return;
+	}
+	static constexpr std::pair<std::string_view, uint32_t> NAMES[] = {
+	    {"cross", PAD_BUTTON_CROSS},       {"circle", PAD_BUTTON_CIRCLE}, {"square", PAD_BUTTON_SQUARE},
+	    {"triangle", PAD_BUTTON_TRIANGLE}, {"options", PAD_BUTTON_OPTIONS}, {"up", PAD_BUTTON_UP},
+	    {"down", PAD_BUTTON_DOWN},         {"left", PAD_BUTTON_LEFT},     {"right", PAD_BUTTON_RIGHT},
+	    {"l1", PAD_BUTTON_L1},             {"r1", PAD_BUTTON_R1},         {"l2", PAD_BUTTON_L2},
+	    {"r2", PAD_BUTTON_R2},             {"touchpad", PAD_BUTTON_TOUCH_PAD}};
+	std::vector<std::pair<double, uint32_t>> presses;
+	std::string_view                         list(value);
+	while (!list.empty()) {
+		const auto comma = list.find(',');
+		const auto item  = list.substr(0, comma);
+		list             = comma == std::string_view::npos ? std::string_view {} : list.substr(comma + 1);
+		const auto colon = item.find(':');
+		if (colon == std::string_view::npos) {
+			continue;
+		}
+		const double seconds = std::strtod(std::string(item.substr(0, colon)).c_str(), nullptr);
+		const auto   name    = item.substr(colon + 1);
+		for (const auto& [n, mask]: NAMES) {
+			if (n == name) {
+				presses.emplace_back(seconds, mask);
+			}
+		}
+	}
+	std::printf("Auto pad: %zu presses scheduled (KYTY_AUTO_PAD)\n", presses.size());
+	std::thread([presses] {
+		const auto start = std::chrono::steady_clock::now();
+		for (const auto& [seconds, mask]: presses) {
+			std::this_thread::sleep_until(start + std::chrono::milliseconds(static_cast<int64_t>(seconds * 1000.0)));
+			for (bool down: {true, false}) {
+				{
+					Common::LockGuard lock(g_router_mutex);
+					g_players[0]->Button(HOST_INPUT_CONTROLLER_ID, mask, down);
+				}
+				if (down) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(150));
+				}
+			}
+			std::printf("Auto pad: pressed 0x%05x at %.1f s\n", mask, seconds);
+			std::fflush(stdout);
+		}
+	}).detach();
+}
+
 void Initialize() {
 	EXIT_IF(g_players[0] != nullptr);
 
@@ -475,6 +528,7 @@ void Initialize() {
 	}
 	g_keyboard_player = Config::GetKeyboardPlayer();
 	RefreshPlayers();
+	StartAutoPad();
 }
 
 void Shutdown() {
@@ -1468,10 +1522,47 @@ int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 	return OK;
 }
 
+// KYTY_PAD_TRACE=1: print each change of what scePadRead/scePadReadState return (handle, result,
+// connected, buttons) and, every 5 s, how often each was called.
+static void TracePadRead(const char* function, int handle, int result, bool connected, uint32_t buttons) {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_TRACE");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	if (!on) {
+		return;
+	}
+	static Common::Mutex mutex;
+	static uint64_t      calls[2] {};
+	static int           last_handle = -1, last_result = -1;
+	static bool          last_connected = false;
+	static uint32_t      last_buttons   = ~0u;
+	static auto          reported       = std::chrono::steady_clock::now();
+	Common::LockGuard    lock(mutex);
+	const bool           is_read = function[7] == '\0';
+	calls[is_read ? 1 : 0]++;
+	if (handle != last_handle || result != last_result || connected != last_connected || buttons != last_buttons) {
+		std::printf("Pad trace: %s(handle %d) -> %d, connected %d, buttons 0x%05x\n", function, handle, result,
+		            connected ? 1 : 0, buttons);
+		last_handle    = handle;
+		last_result    = result;
+		last_connected = connected;
+		last_buttons   = buttons;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - reported >= std::chrono::seconds(5)) {
+		std::printf("Pad trace: last 5 s: %llu PadReadState, %llu PadRead calls\n",
+		            static_cast<unsigned long long>(calls[0]), static_cast<unsigned long long>(calls[1]));
+		calls[0] = calls[1] = 0;
+		reported            = now;
+	}
+}
+
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
 
 	if (const auto error = PadCheckHandle(handle); error != OK) {
+		TracePadRead("PadReadState", handle, error, false, 0);
 		return error;
 	}
 	if (data == nullptr) {
@@ -1485,6 +1576,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PlayerForHandle(handle)->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
+	TracePadRead("PadReadState", handle, OK, connected, state.buttons);
 
 	return OK;
 }
@@ -1494,6 +1586,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (const auto error = PadCheckHandle(handle); error != OK) {
+		TracePadRead("PadRead", handle, error, false, 0);
 		return error;
 	}
 	if (data == nullptr) {
@@ -1516,9 +1609,12 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 		ret_num = 1;
 	}
 
+	uint32_t any_buttons = 0;
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
+		any_buttons |= states[i].buttons;
 	}
+	TracePadRead("PadRead", handle, ret_num, connected, any_buttons);
 
 	return ret_num;
 }
