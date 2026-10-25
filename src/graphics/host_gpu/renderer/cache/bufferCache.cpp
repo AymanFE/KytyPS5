@@ -122,11 +122,12 @@ Live::Switch g_binding_lean_miss("KYTY_BINDING_LEAN_MISS", ParseOnVerifyExit);
 
 // KYTY_FAULT_AHEAD_ADAPT (live): the fault-ahead window of write faults
 // (MemoryTracker::SetFaultAheadOverride, applied at every guest flip).
-//   auto   (default) 256 KiB, 512 KiB or 1 MiB by FaultCost::SlowLevel() 0 / 1 / 2: how slow
+//   auto   256 KiB, 512 KiB or 1 MiB by FaultCost::SlowLevel() 0 / 1 / 2: how slow
 //          protection changes are on this PC (measured, only ever rising; Linux with mprotect
 //          tracking: 1 MiB from the start)
 //   <KiB>  a power of two, 8..4096
-//   0      KYTY_FAULT_AHEAD_KB alone (32 KiB), as before
+//   0      (default) KYTY_FAULT_AHEAD_KB alone (32 KiB). On Saros with memory integrity on, auto
+//          climbed to 1 MiB windows and the slow phase ran at ~4 fps against 8-10 fps here.
 // At the Sky Garden the guest's job threads fill ~16 MB of triple-buffered data per frame. With
 // 32 KiB windows that took ~1,700 faults per frame, 62% of them duplicates (another thread wrote
 // the same page while the first fault was in flight). 256 KiB windows: ~300 faults and ~100
@@ -137,10 +138,10 @@ Live::Switch g_binding_lean_miss("KYTY_BINDING_LEAN_MISS", ParseOnVerifyExit);
 // The handler's own time grows with the window, so it must not choose the window: an earlier rule
 // based on it climbed to 1 MiB on this PC too.
 Live::Switch g_fault_ahead_adapt("KYTY_FAULT_AHEAD_ADAPT", [](const char* value) -> int64_t {
-	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "auto") == 0) {
+	if (value != nullptr && std::strcmp(value, "auto") == 0) {
 		return -2;
 	}
-	if (std::strcmp(value, "0") == 0) {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
 		return 0;
 	}
 	char*      end = nullptr;
@@ -626,8 +627,9 @@ uint64_t ParseEnvU64(const char* name, uint64_t fallback) {
 //                         uploaded (exact shadow compare). It returns to normal tracking after
 //                         KYTY_HOT_PAGE_QUIET_FRAMES frames (default 8) without a change or
 //                         without an upload, on any GPU-side write that can reach it, or when its
-//                         buffer is untracked. At most KYTY_HOT_PAGE_MAX pages (default 16384,
-//                         4 KiB shadow each: 64 MiB) are hot. KYTY_HOT_PAGE_REFAULT (default 1;
+//                         buffer is untracked. At most KYTY_HOT_PAGE_MAX pages (default 65536,
+//                         4 KiB shadow each: 256 MiB; 16384 before: Saros's slow phase rewrites
+//                         more pages than that every frame) are hot. KYTY_HOT_PAGE_REFAULT (default 1;
 //                         0 off): a page that faults a second time in one frame (re-protected by
 //                         an upload in between) is promoted at once.
 //   KYTY_UPLOAD_COPY_OUTSIDE_LOCK  0 copies written uploads with their region locks held (the
@@ -642,7 +644,7 @@ MemoryTracker::FaultPolicy BufferFaultPolicy() {
 		policy.hot_frames = static_cast<uint32_t>(
 		    std::clamp<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_FRAMES", 3), 1, 255));
 		policy.hot_max =
-		    static_cast<uint32_t>(std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_MAX", 16384), 65536));
+		    static_cast<uint32_t>(std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_MAX", 65536), 65536));
 		policy.promote_refaults = ParseEnvU64("KYTY_HOT_PAGE_REFAULT", 1) != 0;
 		if (policy.hot_max == 0) {
 			policy.hot_frames = 0;
