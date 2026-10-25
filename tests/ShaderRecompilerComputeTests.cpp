@@ -8334,7 +8334,7 @@ public:
   // KYTY_BUFFER_RANGE_MEMO: read bindings of a range whose tracker bits did not change skip the
   // tracker work (a clean range's synchronization, a small range's stream decision) and still
   // bind what the full path binds; every CPU write fault makes them look again.
-  // KYTY_HOT_PAGE_CHECK_LIMIT: a hot page that many uploads in a row found unchanged returns to
+  // KYTY_HOT_PAGE_CHECK_LIMIT: a hot page that many frames of uploads found unchanged returns to
   // fault tracking, clean; a write while it is hot, and after it settled, still reaches the GPU.
   // Both adapt to their switches being off (then only the contents are checked).
   void CheckBufferRangeMemo() {
@@ -8588,13 +8588,16 @@ public:
               "three faulting frames did not promote the page");
       if (limit != 0) {
         const auto settles0 = totals().settles;
+        // The limit counts frames: uploads in one frame count once.
         const auto unchanged_uploads = [&](uint32_t count) {
           for (uint32_t check = 0; check < count; check++) {
+            cache.AdvanceFrame();
+            (void)obtain(base + large_offset, large_size, false, false);
             (void)obtain(base + large_offset, large_size, false, false);
           }
         };
-        // limit - 1 unchanged uploads keep it hot; a write while hot (no fault) is uploaded
-        // and restarts the count.
+        // limit - 1 frames of unchanged uploads keep it hot; a write while hot (no fault) is
+        // uploaded and restarts the count.
         unchanged_uploads(limit - 1);
         Require(name, "hot below the limit",
                 tracker.HotPageCount() == 1 && totals().settles == settles0,

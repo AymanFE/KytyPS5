@@ -763,19 +763,23 @@ private:
 		std::unique_ptr<uint8_t[]> data;
 		uint32_t                   last_change = 0;
 		uint32_t                   last_use    = 0;
-		// Uploads in a row that found the page unchanged (KYTY_HOT_PAGE_CHECK_LIMIT).
+		// Frames in a row whose uploads found the page unchanged (KYTY_HOT_PAGE_CHECK_LIMIT), and
+		// the frame that last counted one.
 		uint32_t                   unchanged_checks = 0;
+		uint32_t                   last_check       = 0;
 	};
 	std::map<uint64_t, HotShadow>                     m_hot_shadows;
 	std::vector<uint8_t>                              m_hot_scratch;
 	uint32_t                                          m_hot_quiet_frames = 8;
-	// KYTY_HOT_PAGE_CHECK_LIMIT (default 64; 0 disables): a hot page that this many uploads in a
-	// row found unchanged returns to normal tracking as a clean, write-protected page
-	// (SettleHotPages, which compares it with its shadow once more after protecting it). Its next
-	// write then faults as for any tracked page. Hot pages suit pages written between most
-	// uploads; a page every BDA draw re-examines but the CPU rewrites about once a frame costs
-	// hundreds of 4 KiB compares per frame instead of one fault.
-	uint32_t                                          m_hot_check_limit  = 64;
+	// KYTY_HOT_PAGE_CHECK_LIMIT (default 4; 0 disables): a hot page whose uploads found it
+	// unchanged in this many frames in a row returns to normal tracking as a clean,
+	// write-protected page (SettleHotPages, which compares it with its shadow once more after
+	// protecting it). Its next write then faults as for any tracked page. Counted per frame, not
+	// per upload: a page the CPU rewrites once a frame but dozens of uploads re-examine in between
+	// used to reach 64 unchanged visits within a frame or two, settle, fault on the next write and
+	// be promoted again (Saros: ~37k promotions and demotions a second, 4-9 fps). A 4 KiB compare
+	// costs well under a microsecond; the fault and re-protect it saves cost ~100 us.
+	uint32_t                                          m_hot_check_limit  = 4;
 	// KYTY_BUFFER_RANGE_MEMO (nullptr when disabled).
 	std::unique_ptr<RangeMemo[]>                      m_range_memo;
 	// Always counted (GPU thread; the BufferRangeMemo* frame events need a connected profiler).

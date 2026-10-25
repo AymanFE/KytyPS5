@@ -600,7 +600,7 @@ uint32_t HotPageQuietFrames() {
 // BufferCache::m_hot_check_limit (0 disables).
 uint32_t HotPageCheckLimit() {
 	return static_cast<uint32_t>(
-	    std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_CHECK_LIMIT", 64), 1u << 20u));
+	    std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_CHECK_LIMIT", 4), 1u << 20u));
 }
 
 // BufferCache::RangeMemo (bufferCache.h).
@@ -1748,9 +1748,12 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 				skipped++;
 				auto& state    = shadow->second;
 				state.last_use = frame;
+				const bool new_frame = state.last_check != frame;
+				state.last_check     = frame;
 				if (frame - state.last_change > m_hot_quiet_frames) {
 					demote.push_back(page);
-				} else if (m_hot_check_limit != 0 && ++state.unchanged_checks >= m_hot_check_limit) {
+				} else if (m_hot_check_limit != 0 && new_frame &&
+				           ++state.unchanged_checks >= m_hot_check_limit) {
 					// Checked far more often than written: back to fault tracking, clean (the
 					// buffer holds exactly the shadow, which SettleHotPages compares again once the
 					// page is write-protected).
@@ -1787,6 +1790,7 @@ void BufferCache::CollectHotPages(Buffer& buffer, std::span<const GuestRange> ho
 				shadow->second.last_change      = frame;
 				shadow->second.last_use         = frame;
 				shadow->second.unchanged_checks = 0;
+				shadow->second.last_check       = frame;
 			}
 			copies.emplace_back(total_size, buffer.Offset(page), TRACKER_PAGE_SIZE);
 			total_size += TRACKER_PAGE_SIZE;
