@@ -410,6 +410,66 @@ void ReportReadFaultPublished(uint32_t frame) {
 	            take(state.verify_different));
 }
 
+// KYTY_READ_FAULT_CLEAN (live, default off; =1 on, =verify): a guest thread's read fault whose
+// load (common/guestLoad.h, within one page) reads only bytes the GPU does not own completes in the
+// handler with the backing bytes, without waiting for the GPU. The page is protected for its other
+// bytes (a stream copy's destination next to them, typically): the bytes served are exactly those
+// the load would read if that page were not protected, so this changes no ordering the guest can
+// observe. Clean means: no GPU-dirty buffer bytes (HasGpuDirtyBytes), no pending backing
+// publication, and no GPU-modified image over the range, checked on the GPU thread. Saros' slow
+// scenes waited about 0.4 ms per such fault, about 7 s of waits per 80 s, mostly on the render
+// thread (READ_FAULT_DIAG dirty=0). A burst of faults on one page (a copy loop) waits instead, so
+// the readback publishes the page and unprotects it. =verify serves nothing, and compares the clean
+// bytes with those found after the wait. One "Kyty read-fault clean" line every 10 s while on.
+int64_t ParseReadFaultClean(const char* value) {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	return std::strcmp(value, "verify") == 0 ? 2 : 1;
+}
+Live::Switch g_read_fault_clean("KYTY_READ_FAULT_CLEAN", ParseReadFaultClean);
+
+struct ReadFaultCleanState {
+	std::atomic<uint64_t> served {0};
+	std::atomic<uint64_t> dirty {0};
+	std::atomic<uint64_t> undecodable {0};
+	std::atomic<uint64_t> burst {0};
+	std::atomic<uint64_t> other {0};
+	std::atomic<uint64_t> check_ns {0};
+	std::atomic<uint64_t> verify_equal {0};
+	std::atomic<uint64_t> verify_different {0};
+	std::atomic<uint64_t> report_ns {0};
+	std::atomic<uint32_t> logged {0};
+};
+ReadFaultCleanState& ReadFaultClean() {
+	static ReadFaultCleanState state;
+	return state;
+}
+
+void ReportReadFaultClean() {
+	auto&      state = ReadFaultClean();
+	const auto now   = ReadFaultDiag::NowNs();
+	auto       last  = state.report_ns.load(std::memory_order_relaxed);
+	if (last == 0) {
+		state.report_ns.compare_exchange_strong(last, now);
+		return;
+	}
+	if (now - last < 10'000'000'000ull || !state.report_ns.compare_exchange_strong(last, now)) {
+		return;
+	}
+	const auto take    = [](std::atomic<uint64_t>& counter) { return counter.exchange(0); };
+	const auto served  = take(state.served);
+	const auto dirty   = take(state.dirty);
+	const auto checks  = served + dirty;
+	const auto check_ns = take(state.check_ns);
+	std::printf("Kyty read-fault clean 10s: served %" PRIu64 ", GPU-owned bytes %" PRIu64
+	            " (check avg %.1f us); not a plain load %" PRIu64 ", copy burst %" PRIu64
+	            ", other %" PRIu64 "; verify: equal %" PRIu64 ", different %" PRIu64 "\n",
+	            served, dirty, checks != 0 ? static_cast<double>(check_ns) / 1e3 / checks : 0.0,
+	            take(state.undecodable), take(state.burst), take(state.other),
+	            take(state.verify_equal), take(state.verify_different));
+}
+
 // The number of regions copies (source ascending) give when a copy starting at most `gap` bytes
 // after the previous region's source end joins it.
 uint64_t CountMergedRegions(std::span<const vk::BufferCopy> copies, uint64_t gap) {
@@ -2044,6 +2104,83 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 			return;
 		} else {
 			state.other.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	// KYTY_READ_FAULT_CLEAN: serve a load of bytes the GPU does not own; verify compares after the
+	// wait below.
+	struct CleanVerify {
+		GuestLoad::Load load;
+		uint8_t         before[16] {};
+		~CleanVerify() {
+			uint8_t after[16] {};
+			if (!LibKernel::Memory::TryReadBacking(load.address, after, load.size)) {
+				return;
+			}
+			auto&      state = ReadFaultClean();
+			const bool equal = std::memcmp(before, after, load.size) == 0;
+			(equal ? state.verify_equal : state.verify_different).fetch_add(1, std::memory_order_relaxed);
+			if (!equal && state.logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+				std::string text;
+				for (uint32_t i = 0; i < load.size; i++) {
+					text += fmt::format("{:02x}{:02x} ", before[i], after[i]);
+				}
+				std::printf("Kyty read-fault clean verify: 0x%" PRIx64 " (%u bytes) clean/waited "
+				            "bytes differ: %s\n",
+				            load.address, load.size, text.c_str());
+			}
+		}
+	};
+	std::optional<CleanVerify> clean_verify;
+	if (const auto clean_mode = g_read_fault_clean.Get();
+	    clean_mode != 0 && !is_write && GuestLoad::t_native_context != nullptr &&
+	    !GuestGpu::IsGpuThread() && !published_verify) {
+		auto& state = ReadFaultClean();
+		ReportReadFaultClean();
+		const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+		// A copy loop over the page would fault on every load: after a burst, wait (which
+		// publishes the page and makes it readable) instead.
+		thread_local uint64_t burst_page  = 0;
+		thread_local uint64_t burst_ns    = 0;
+		thread_local uint32_t burst_count = 0;
+		const auto            now_ns      = ReadFaultDiag::NowNs();
+		burst_count = burst_page == page && now_ns - burst_ns < 1'000'000 ? burst_count + 1 : 0;
+		burst_page  = page;
+		burst_ns    = now_ns;
+		GuestLoad::Load load;
+		if (burst_count >= 8) {
+			state.burst.fetch_add(1, std::memory_order_relaxed);
+		} else if (!GuestLoad::Decode(vaddr, load) ||
+		           Common::AlignDown(load.address + load.size - 1, TRACKER_PAGE_SIZE) != page) {
+			state.undecodable.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			bool       clean = false;
+			uint8_t    bytes[16] {};
+			const auto start = ReadFaultDiag::NowNs();
+			// The ownership state is the GPU thread's; read the bytes there too, so no publication
+			// or GPU-dirty mark can come between the check and the read.
+			m_scheduler.Context().GetGpu().SendCommandSync([&, this] {
+				clean = !HasGpuDirtyBytes(load.address, load.size) &&
+				        !HasPendingBackingPublication(load.address, load.size) &&
+				        !m_texture_cache.IsRegionGpuModified(load.address, load.size) &&
+				        LibKernel::Memory::TryReadBacking(load.address, bytes, load.size);
+			});
+			state.check_ns.fetch_add(ReadFaultDiag::NowNs() - start, std::memory_order_relaxed);
+			if (!clean) {
+				state.dirty.fetch_add(1, std::memory_order_relaxed);
+			} else if (clean_mode == 2) {
+				state.served.fetch_add(1, std::memory_order_relaxed);
+				clean_verify.emplace();
+				clean_verify->load = load;
+				std::memcpy(clean_verify->before, bytes, load.size);
+			} else if (GuestLoad::Apply(load, bytes)) {
+				state.served.fetch_add(1, std::memory_order_relaxed);
+				if (diag) {
+					diag->SetPath("clean-served");
+				}
+				return;
+			} else {
+				state.other.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 	}
 	const auto diag_path = [&diag](const char* path) {
