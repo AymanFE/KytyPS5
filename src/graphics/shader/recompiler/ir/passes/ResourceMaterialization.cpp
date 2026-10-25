@@ -51,6 +51,9 @@ bool SpecializationFail(std::string_view message) {
 	}
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
+	// The console log captures stdout only.
+	std::printf("shader resource specialization failed: %.*s\n", static_cast<int>(message.size()),
+	            message.data());
 	return false;
 }
 
@@ -441,6 +444,16 @@ private:
 	bool                          m_indexed = false;
 };
 
+// The reason an indirect image's candidates could not be materialized (the dispatch or draw is
+// dropped): its shader and the refusing check's source line, once each.
+bool IndirectImageFail(const ResourcePlan& program, int line) {
+	char text[128];
+	std::snprintf(text, sizeof(text), "indirect image of shader 0x%016llx refused at "
+	              "ResourceMaterialization.cpp:%d",
+	              static_cast<unsigned long long>(program.shader_hash), line);
+	return SpecializationFail(text);
+}
+
 template <bool Optimize>
 bool MaterializeIndirectImage(const ResourcePlan& program,
                               const DescriptorSource::IndirectDescriptor& indirect,
@@ -458,7 +471,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		table_base = table.Base48();
 		table_size = table.GetSize();
 	} else {
-		return false;
+		return IndirectImageFail(program, __LINE__);
 	}
 	auto& keys = scratch.material_keys;
 	keys.clear();
@@ -475,12 +488,12 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			// KYTY_INDIRECT_TABLE_IMAGES: every entry the table's V# covers (scalar buffer loads
 			// past num_records read zeros, a null T#).
 			if (indirect.table_offset >= table_size) {
-				return false;
+				return IndirectImageFail(program, __LINE__);
 			}
 			const auto entries = std::min<uint64_t>((table_size - indirect.table_offset) / 32u,
 			                                        MaxTableBoundedKeys);
 			if (entries == 0u) {
-				return false;
+				return IndirectImageFail(program, __LINE__);
 			}
 			keys.resize(static_cast<size_t>(entries));
 			std::iota(keys.begin(), keys.end(), 0u);
@@ -490,7 +503,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			if (table_value.dword_count != 2u || !evaluated ||
 			    key_count > MaxIndirectImageProbes ||
 			    uint64_t {indirect.table_offset} + uint64_t {key_count} * 32u > UINT32_MAX + 1ull) {
-				return false;
+				return IndirectImageFail(program, __LINE__);
 			}
 			keys.resize(key_count);
 			std::iota(keys.begin(), keys.end(), 0u);
@@ -501,7 +514,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		if (material_value.dword_count != 2u || table_value.dword_count != 2u ||
 		    !clean.Evaluate(indirect.selector_mask, mask) ||
 		    !clean.Evaluate(indirect.key_count, count) || count == 0u || count > 32u) {
-			return false;
+			return IndirectImageFail(program, __LINE__);
 		}
 		if (count < 32u) mask &= (1u << count) - 1u;
 		const auto material_base =
@@ -511,10 +524,10 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			const auto index = std::countr_zero(mask);
 			const auto offset = static_cast<uint64_t>(indirect.selector->offset) +
 			                    static_cast<uint64_t>(index) * indirect.selector->stride;
-			if (offset > UINT32_MAX) return false;
+			if (offset > UINT32_MAX) return IndirectImageFail(program, __LINE__);
 			uint32_t key = 0;
 			if (!ReadScalarTable(material_base, UINT64_MAX, static_cast<uint32_t>(offset),
-			                     runtime, {&key, 1})) return false;
+			                     runtime, {&key, 1})) return IndirectImageFail(program, __LINE__);
 			keys.push_back(key);
 			mask &= mask - 1u;
 		}
@@ -524,7 +537,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		ShaderBufferResource material;
 		if (!DecodeBufferDescriptor(material_value, material) || table_value.dword_count != 4u ||
 		    material.Stride() != indirect.selector->stride) {
-			return false;
+			return IndirectImageFail(program, __LINE__);
 		}
 		// Enumerate every wrapped scalar-buffer offset that can pass the descriptor bounds.
 		const auto step = std::gcd<uint64_t>(indirect.selector->stride, uint64_t {1} << 32u);
@@ -532,7 +545,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		const auto limit = std::min<uint64_t>(UINT32_MAX, material.GetSize() + 3u);
 		const auto probe_count = residue <= limit ? (limit - residue) / step + 1u : 0u;
 		if (probe_count > MaxIndirectImageProbes) {
-			return false;
+			return IndirectImageFail(program, __LINE__);
 		}
 		keys.reserve(static_cast<size_t>(probe_count) + 1u);
 		keys.push_back(0u);
@@ -540,7 +553,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			uint32_t key = 0;
 			if (!ReadScalarTable(material.Base48(), material.GetSize(),
 			                     static_cast<uint32_t>(offset), runtime, {&key, 1})) {
-				return false;
+				return IndirectImageFail(program, __LINE__);
 			}
 			keys.push_back(key);
 			if (limit - offset < step) {
@@ -566,7 +579,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			// A table-bounded image's descriptor may claim more entries than are mapped: the
 			// unreadable ones are null candidates rather than a failed dispatch.
 			if (!table_bounded) {
-				return false;
+				return IndirectImageFail(program, __LINE__);
 			}
 			candidate.dwords.fill(0);
 		}
@@ -592,7 +605,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 			if (ordinal > snapshot.images.size() - children_begin) {
 				if (snapshot.images.size() >= ShaderInfo::MaxImages) {
 					if (!table_bounded) {
-						return false;
+						return IndirectImageFail(program, __LINE__);
 					}
 					// More distinct descriptors than bindings: such keys select the first entry
 					// (a wrong texture for them instead of dropping every dispatch).

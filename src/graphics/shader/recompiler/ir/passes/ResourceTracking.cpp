@@ -9,7 +9,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
+#include <mutex>
+#include <set>
 #include <span>
+#include <string>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -880,15 +883,38 @@ private:
 
 	// KYTY_INDIRECT_IMAGE_DIAG=1: which check refused an indirect image plan (source line), once per
 	// pc; the program's skip line names the shader.
-	static bool IndirectFail(uint32_t pc, int line) {
+	static bool IndirectFail(uint32_t pc, int line, const Inst* value = nullptr, uint32_t dword = 0) {
 		static const bool diag = [] {
 			const char* value = std::getenv("KYTY_INDIRECT_IMAGE_DIAG");
 			return value != nullptr && std::strcmp(value, "1") == 0;
 		}();
-		if (diag) {
-			std::printf("KYTY_INDIRECT_IMAGE_DIAG: image at pc=0x%08x refused at "
-			            "ResourceTracking.cpp:%d\n", pc, line);
+		if (!diag) {
+			return false;
 		}
+		// What the refused T# word is (for a phi, what it merges).
+		std::string what;
+		if (value != nullptr) {
+			what = fmt::format(" (T# dword {}: {}", dword, ValueOpcodeName(value->GetOpcode()));
+			if (value->GetOpcode() == ValueOpcode::Phi) {
+				for (size_t arg = 0; arg < value->NumArgs(); ++arg) {
+					const auto* input = value->Arg(arg).Resolve().TryInstruction();
+					what += arg == 0 ? " of " : ", ";
+					what += input != nullptr ? std::string(ValueOpcodeName(input->GetOpcode()))
+					                         : std::string("immediate");
+				}
+			}
+			what += ")";
+		}
+		static std::mutex                         mutex;
+		static std::set<std::pair<uint32_t, int>> seen;
+		{
+			std::scoped_lock lock(mutex);
+			if (seen.size() >= 4096 || !seen.emplace(pc, line).second) {
+				return false;
+			}
+		}
+		std::printf("KYTY_INDIRECT_IMAGE_DIAG: image at pc=0x%08x refused at "
+		            "ResourceTracking.cpp:%d%s\n", pc, line, what.c_str());
 		return false;
 	}
 
@@ -908,7 +934,7 @@ private:
 			const auto* memory = ScalarReadMemory(*read, memory_index);
 			if (memory == nullptr || memory->offset > INT32_MAX || (memory->offset & 3u) != 0u ||
 			    !MemoryIndexBelongsTo(memory_index, *read)) {
-				return IndirectFail(pc, __LINE__);
+				return IndirectFail(pc, __LINE__, read, dword);
 			}
 			auto* current_handle = read->Arg(0).Resolve().TryInstruction();
 			Value current_key;
