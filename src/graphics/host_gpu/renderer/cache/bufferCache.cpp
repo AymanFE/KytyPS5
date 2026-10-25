@@ -5937,6 +5937,38 @@ uint32_t BufferCache::ApplyBdaStoreLog(std::span<const FaultManager::BdaStore> s
 	});
 	// A memory write the command processor orders before later work (syncEpoch.h).
 	SyncEpoch::Advance();
+	// KYTY_BDA_STORE_LOG_BACK (default 1; =0 leaves it to the fault pass): the pages that took
+	// logged stores get a cache buffer now, from the guest bytes just written. The fault pass only
+	// creates them at the next garbage collection, so the dispatches after this one in the same
+	// frame hit the same unbacked pages: Saros's clear (0xb9da5e64f4c5b10a), BVH builder
+	// (0x26ea14a341c67c0f) and refit run back to back, and the builder's append atomics, whose
+	// old value it reads, cannot be logged, so they were dropped and the refit climbed garbage.
+	static const bool back_pages = [] {
+		const auto* value = std::getenv("KYTY_BDA_STORE_LOG_BACK");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	if (back_pages) {
+		RangeSet pages;
+		dwords.ForEach([&](uint64_t start, uint64_t end) {
+			if (refused.Intersects(start, end - start)) {
+				return;
+			}
+			const auto first = start & ~(CACHING_PAGESIZE - 1);
+			const auto last  = (end + CACHING_PAGESIZE - 1) & ~(CACHING_PAGESIZE - 1);
+			pages.Add(first, last - first);
+		});
+		pages.ForEach([&](uint64_t start, uint64_t end) {
+			if (end - start <= uint64_t {0xffffffff}) {
+				(void)FindBuffer(start, end - start);
+			}
+		});
+		if (!pages.Empty() && FirstBdaWriteNote(shader_hash, 7)) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "KYTY_BDA_STORE_LOG: CS shader 0x{:016x} logged stores; their pages got a cache "
+			    "buffer for the dispatches after it (KYTY_BDA_STORE_LOG_BACK).\n",
+			    shader_hash));
+		}
+	}
 	if (!refused.Empty() && FirstBdaWriteNote(shader_hash, 4)) {
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "KYTY_BDA_STORE_LOG: CS shader 0x{:016x} stored to bytes without a cache buffer that the "
