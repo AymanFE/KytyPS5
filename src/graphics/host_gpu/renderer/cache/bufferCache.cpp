@@ -566,8 +566,10 @@ uint64_t ParseEnvU64(const char* name, uint64_t fallback) {
 //                         uploaded (exact shadow compare). It returns to normal tracking after
 //                         KYTY_HOT_PAGE_QUIET_FRAMES frames (default 8) without a change or
 //                         without an upload, on any GPU-side write that can reach it, or when its
-//                         buffer is untracked. At most KYTY_HOT_PAGE_MAX pages (default 1024,
-//                         4 KiB shadow each) are hot.
+//                         buffer is untracked. At most KYTY_HOT_PAGE_MAX pages (default 16384,
+//                         4 KiB shadow each: 64 MiB) are hot. KYTY_HOT_PAGE_REFAULT (default 1;
+//                         0 off): a page that faults a second time in one frame (re-protected by
+//                         an upload in between) is promoted at once.
 //   KYTY_UPLOAD_COPY_OUTSIDE_LOCK  0 copies written uploads with their region locks held (the
 //                         previous behaviour) instead of MemoryTracker::ForEachWrittenUploadRange.
 MemoryTracker::FaultPolicy BufferFaultPolicy() {
@@ -580,7 +582,8 @@ MemoryTracker::FaultPolicy BufferFaultPolicy() {
 		policy.hot_frames = static_cast<uint32_t>(
 		    std::clamp<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_FRAMES", 3), 1, 255));
 		policy.hot_max =
-		    static_cast<uint32_t>(std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_MAX", 1024), 65536));
+		    static_cast<uint32_t>(std::min<uint64_t>(ParseEnvU64("KYTY_HOT_PAGE_MAX", 16384), 65536));
+		policy.promote_refaults = ParseEnvU64("KYTY_HOT_PAGE_REFAULT", 1) != 0;
 		if (policy.hot_max == 0) {
 			policy.hot_frames = 0;
 		}

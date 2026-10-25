@@ -243,6 +243,9 @@ public:
 		uint32_t ahead_pages = 1; // power of two dividing TRACKER_REGION_PAGES; 1 = off
 		uint32_t hot_frames  = 0; // 0 = hot pages off
 		uint32_t hot_max     = 0;
+		// A page faulting twice in one frame (re-protected by an upload in between) is promoted
+		// at once instead of waiting for `hot_frames` consecutive frames.
+		bool promote_refaults = false;
 		// Written uploads copy with no region lock held (MemoryTracker::ForEachWrittenUploadRange).
 		bool copy_outside_lock = false;
 	};
@@ -305,15 +308,25 @@ public:
 		for (size_t page = start; page < end; page++) {
 			auto& streak = m_history->streak[page];
 			auto& last   = m_history->frame[page];
-			if (already_dirty.Get(page) || (streak != 0 && last == current)) {
+			if (already_dirty.Get(page)) {
 				continue;
 			}
-			streak = (streak != 0 && last == previous && streak != UINT8_MAX)
-			             ? static_cast<uint8_t>(streak + 1)
-			             : uint8_t {1};
-			last   = current;
-			if (streak < policy.hot_frames) {
+			// A second fault in the same frame: an upload re-protected the page after its first
+			// write this frame, and the guest wrote it again. That is the fault/re-protect cycle hot
+			// pages exist to end, so with `promote_refaults` it promotes at once (Saros's UE render
+			// and worker threads rewrite thousands of such pages per frame, ~700 of them twice).
+			const bool refault = streak != 0 && last == current;
+			if (refault && !policy.promote_refaults) {
 				continue;
+			}
+			if (!refault) {
+				streak = (streak != 0 && last == previous && streak != UINT8_MAX)
+				             ? static_cast<uint8_t>(streak + 1)
+				             : uint8_t {1};
+				last   = current;
+				if (streak < policy.hot_frames) {
+					continue;
+				}
 			}
 			if (hot_count.fetch_add(1, std::memory_order_relaxed) >= policy.hot_max) {
 				hot_count.fetch_sub(1, std::memory_order_relaxed);
