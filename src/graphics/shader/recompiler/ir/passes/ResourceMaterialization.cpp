@@ -564,6 +564,26 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
 	}
 
+	// KYTY_TABLE_KIND_PREFILTER (default on; =0 off): a table-bounded image enumerates the whole
+	// bindless table, whose first entries are mostly of other kinds (2D textures for a 3D
+	// IMAGE_LOAD). Those take the shader's MaxImages bindings before the candidates the instruction
+	// can read are reached, which then select the first entry and are nulled later (Saros' GI
+	// probe volumes, CS 0x9fba2edffc549531: dark ambient). They become null here instead.
+	static const bool kind_prefilter = [] {
+		const char* value = std::getenv("KYTY_TABLE_KIND_PREFILTER");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	const auto wanted = program.info.images[image_index].dimension;
+	const auto fits   = [&](const DescriptorValue& candidate) {
+		if (wanted == Decoder::ImageDimension::Unknown) return true;
+		const auto dimension = DescriptorDimension(candidate, wanted);
+		const auto is_2d     = [](Decoder::ImageDimension d) {
+			return d == Decoder::ImageDimension::Dim2D || d == Decoder::ImageDimension::Dim2DArray;
+		};
+		return dimension == wanted || (is_2d(dimension) && is_2d(wanted));
+	};
+	uint32_t other_kind = 0;
+	uint32_t overflowed = 0;
 	const auto children_begin = snapshot.images.size();
 	const auto mapping_offset = snapshot.flattened_srt.size();
 	const auto root_image = specialization.images[image_index];
@@ -586,6 +606,9 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		if (NullImageDescriptor(candidate) ||
 		    !ValidImageDescriptor(candidate, program.info.images[image_index].r128)) {
 			candidate.dwords.fill(0);
+		} else if (table_bounded && kind_prefilter && !fits(candidate)) {
+			candidate.dwords.fill(0);
+			other_kind++;
 		}
 		uint32_t ordinal = 0;
 		if (entry == 0) {
@@ -617,6 +640,7 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 					}
 					snapshot.flattened_srt[mapping_offset + 1u + entry * 2u] = key;
 					snapshot.flattened_srt[mapping_offset + 2u + entry * 2u] = 0u;
+					overflowed++;
 					continue;
 				}
 				snapshot.images.push_back(candidate);
@@ -628,6 +652,26 @@ bool MaterializeIndirectImage(const ResourcePlan& program,
 		}
 		snapshot.flattened_srt[mapping_offset + 1u + entry * 2u] = key;
 		snapshot.flattened_srt[mapping_offset + 2u + entry * 2u] = ordinal;
+	}
+	if (table_bounded) {
+		// One line per table-bounded image (shader, instruction): how the table's entries landed.
+		static std::mutex                             mutex;
+		static std::unordered_set<uint64_t>           seen;
+		const uint64_t id = program.shader_hash ^ (uint64_t {program.info.images[image_index].first_use_pc} << 1u);
+		bool           first = false;
+		{
+			const std::lock_guard lock(mutex);
+			first = seen.size() < 256u && seen.insert(id).second;
+		}
+		if (first) {
+			std::printf("KYTY_INDIRECT_TABLE_IMAGES: shader 0x%016llx pc 0x%08x dim %u: %zu entries, "
+			            "%u of another kind nulled, %zu distinct bound, %u over the binding limit "
+			            "(shader images %zu)\n",
+			            static_cast<unsigned long long>(program.shader_hash),
+			            program.info.images[image_index].first_use_pc, static_cast<uint32_t>(wanted),
+			            keys.size(), other_kind, snapshot.images.size() - children_begin, overflowed,
+			            snapshot.images.size());
+		}
 	}
 	if (snapshot.images.size() == children_begin) {
 		snapshot.flattened_srt.resize(mapping_offset);
