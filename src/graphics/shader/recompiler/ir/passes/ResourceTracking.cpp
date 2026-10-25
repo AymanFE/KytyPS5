@@ -1255,12 +1255,23 @@ private:
 		     (memory.image_sample_flags & Decoder::ImageSampleFlagLod) != 0u);
 		const auto mip = dynamic_mip ? ImageMipMode::Dynamic : ImageMipMode::None;
 		const bool depth = (memory.image_sample_flags & Decoder::ImageSampleFlagCompare) != 0;
+		// A bindless table's IMAGE_LOADs and its samples are separate images: the loads read raw
+		// texels of any numeric class (KYTY_TABLE_MIXED_CLASSES), the samples only the table's float
+		// candidates (Saros' GI kernels sample float probe volumes and load a uint one).
+		const bool fetch = op == ValueOpcode::ImageRead;
+		const bool table = source < m_sources.size() && m_sources[source].indirect_descriptor.has_value() &&
+		                   [&] {
+			                   const auto bound = m_sources[source].indirect_descriptor->key_count.Resolve();
+			                   return bound.IsImmediate() && bound.GetType() == Type::U32 &&
+			                          bound.U32() == DescriptorSource::IndirectDescriptor::TableBoundedKeys;
+		                   }();
+		m_image_fetch.resize(m_info.images.size());
 		for (uint32_t i = 0; i < m_info.images.size(); i++) {
 			auto& image = m_info.images[i];
 			if (image.source == source && image.resource_class == resource_class &&
 			    image.dimension == memory.image_dimension && image.mip_mode == mip &&
 			    image.depth_compare == depth && image.r128 == memory.image_r128 &&
-			    image.atomic64 == atomic64) {
+			    image.atomic64 == atomic64 && (!table || (m_image_fetch[i] != 0u) == fetch)) {
 				Merge(image, op, pc);
 				return i;
 			}
@@ -1279,6 +1290,7 @@ private:
 		image.atomic64       = atomic64;
 		Merge(image, op, pc);
 		m_info.images.push_back(image);
+		m_image_fetch.push_back(fetch ? 1u : 0u);
 		return static_cast<uint32_t>(m_info.images.size() - 1);
 	}
 
@@ -1532,6 +1544,7 @@ private:
 	std::vector<HandlePatch>                   m_handle_patches;
 	std::vector<MemoryPatch>                   m_memory_patches;
 	std::vector<IndirectImagePlan>             m_indirect_images;
+	std::vector<uint8_t>                       m_image_fetch; // per m_info.images: added by an ImageRead
 	std::vector<std::pair<const Inst*, Value>> m_descriptor_selections;
 	bool                                       m_shader_writes = false;
 	bool                                       m_indirect_scalar_buffers = false;
