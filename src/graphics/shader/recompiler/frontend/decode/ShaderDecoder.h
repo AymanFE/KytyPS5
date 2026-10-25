@@ -792,6 +792,9 @@ enum class OperandKind {
 	Scc,
 	M0,
 	PopsExitingWaveId,
+	// SRC_SHARED_BASE/LIMIT, SRC_PRIVATE_BASE/LIMIT (SSRC 235-238): the aperture's high dword in
+	// `value`; a 64-bit read gives the whole address, with a low dword of ones for a limit.
+	Aperture,
 	Null,
 	Vgpr,
 };

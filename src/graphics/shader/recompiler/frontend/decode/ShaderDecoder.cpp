@@ -272,6 +272,16 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 		case 125u: operand.kind = OperandKind::Null; return;
 		case 126u: operand.kind = OperandKind::ExecLo; return;
 		case 127u: operand.kind = OperandKind::ExecHi; return;
+		case 235u:
+		case 236u:
+		case 237u:
+		case 238u:
+			// The flat apertures of the gfx9+ default SH_MEM_BASES: LDS at 1 << 48, scratch at 2 << 48.
+			// A generic pointer built from them is outside the 40-bit guest address space.
+			operand.kind  = OperandKind::Aperture;
+			operand.reg   = code;
+			operand.value = code <= 236u ? 0x00010000u : 0x00020000u;
+			return;
 		case 239u: operand.kind = OperandKind::PopsExitingWaveId; return;
 		case 248u:
 			operand.kind      = OperandKind::FloatInlineConstant;
@@ -481,6 +491,12 @@ std::string OperandToString(const Operand& operand) {
 		case OperandKind::Scc: text = "scc"; break;
 		case OperandKind::M0: text = "m0"; break;
 		case OperandKind::PopsExitingWaveId: text = "pops_exiting_wave_id"; break;
+		case OperandKind::Aperture: {
+			constexpr const char* names[] = {"src_shared_base", "src_shared_limit", "src_private_base",
+			                                 "src_private_limit"};
+			text = names[(operand.reg - 235u) & 3u];
+			break;
+		}
 		case OperandKind::Null: text = "null"; break;
 		default: text = "unknown"; break;
 	}

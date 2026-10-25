@@ -39,8 +39,10 @@ public:
 		uint32_t value        = 0;
 		uint32_t mask         = 0;
 		[[nodiscard]] uint64_t Address() const {
-			return address_low | (static_cast<uint64_t>(address_high) << 32u);
+			return address_low | (static_cast<uint64_t>(address_high & 0x00ffffffu) << 32u);
 		}
+		// BufferCache::BdaLogOp, from the address-high word's top byte.
+		[[nodiscard]] uint32_t Op() const { return address_high >> 24u; }
 	};
 	struct BdaWrites {
 		std::vector<uint64_t> pages;

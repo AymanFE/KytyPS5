@@ -141,6 +141,7 @@ IR::U32 Translator::ReadRawU32(const Decoder::Operand& operand) {
 		case Decoder::OperandKind::FloatInlineConstant: return IR::U32(IR::Value(operand.value));
 		case Decoder::OperandKind::Null:
 		case Decoder::OperandKind::PopsExitingWaveId: return IR::U32(IR::Value(0u));
+		case Decoder::OperandKind::Aperture: return IR::U32(IR::Value(operand.value));
 		case Decoder::OperandKind::Sgpr:
 			return ir.GetScalarReg(static_cast<IR::ScalarReg>(operand.reg));
 		case Decoder::OperandKind::Vgpr:
@@ -484,6 +485,10 @@ std::array<IR::U32, 2> Translator::ReadU32Pair(const Decoder::Operand& operand) 
 		        : std::bit_cast<uint64_t>(static_cast<double>(std::bit_cast<float>(operand.value)));
 		return {IR::U32(IR::Value(static_cast<uint32_t>(bits))),
 		        IR::U32(IR::Value(static_cast<uint32_t>(bits >> 32u)))};
+	}
+	if (operand.kind == Decoder::OperandKind::Aperture) {
+		const bool limit = operand.reg == 236u || operand.reg == 238u;
+		return {IR::U32(IR::Value(limit ? 0xffffffffu : 0u)), IR::U32(IR::Value(operand.value))};
 	}
 	const auto low = ApplyBitSourceModifiers(operand, ReadRawU32(operand));
 	IR::U32    high(IR::Value(0u));

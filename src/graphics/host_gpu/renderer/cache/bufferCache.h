@@ -91,7 +91,13 @@ public:
 	static constexpr uint64_t BDA_WRITE_BITMAP_WORD   = FAULT_BITMAP_WORDS;
 	static constexpr uint64_t BDA_DROPPED_WRITES_WORD = 2 * FAULT_BITMAP_WORDS;
 	static constexpr uint64_t BDA_STORE_LOG_WORD      = BDA_DROPPED_WRITES_WORD + 4;
-	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 4096;
+	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 16384;
+	// KYTY_BDA_STORE_LOG: an entry's operation, in the top byte of its address-high word (guest
+	// addresses are 40-bit). Store replaces the masked bits of the dword; the others are a 32-bit
+	// BUFFER_ATOMIC_* whose old value the shader does not read (GLC=0), which the settle applies to
+	// the dword in log order.
+	enum class BdaLogOp : uint32_t { Store = 0, Add, Sub, And, Or, Xor, UMin, UMax, SMin, SMax, Swap };
+	static constexpr uint32_t BDA_STORE_LOG_OP_SHIFT  = 24;
 	static constexpr uint64_t BDA_STORE_LOG_BYTES     = (4 + 4 * BDA_STORE_LOG_ENTRIES) * sizeof(uint32_t);
 	static constexpr uint64_t BDA_WRITES_FAULT_BUFFER_SIZE =
 	    BDA_STORE_LOG_WORD * sizeof(uint32_t) + BDA_STORE_LOG_BYTES;

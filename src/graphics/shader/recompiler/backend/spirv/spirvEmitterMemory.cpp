@@ -1266,8 +1266,11 @@ void RecordBdaDroppedWrite(EmitterState& state) {
 // KYTY_BDA_STORE_LOG: a dword store to a page without a cache buffer. The next store-log entry
 // (BufferCache::BDA_STORE_LOG_WORD) takes the dword-aligned guest address, the value and the mask of
 // the bits it replaces, and the settle writes it into guest memory; past the log's capacity the store
-// is dropped and counted as before. Entries of one invocation keep its program order.
-void LogBdaStore(EmitterState& state, uint32_t guest, uint32_t value, uint32_t mask) {
+// is dropped and counted as before. Entries of one invocation keep its program order. A non-Store
+// `op` (BufferCache::BdaLogOp) logs a 32-bit atomic whose old value nobody reads instead; it goes
+// in the top byte of the address-high word.
+void LogBdaStore(EmitterState& state, uint32_t guest, uint32_t value, uint32_t mask,
+                 BufferCache::BdaLogOp op) {
 	const auto count = state.builder.AllocateId();
 	state.builder.AddFunction(
 	    spv::OpAtomicIAdd, TypeU32(state), count,
@@ -1283,12 +1286,16 @@ void LogBdaStore(EmitterState& state, uint32_t guest, uint32_t value, uint32_t m
 		    state, spv::OpIAdd, TypeU32(state),
 		    Binary(state, spv::OpShiftLeftLogical, TypeU32(state), count, ConstantU32(state, 2)),
 		    ConstantU32(state, static_cast<uint32_t>(BufferCache::BDA_STORE_LOG_WORD + 4u)));
-		const std::array<uint32_t, 4> words {
-		    Unary(state, spv::OpUConvert, TypeU32(state), guest),
-		    Unary(state, spv::OpUConvert, TypeU32(state),
-		          Binary(state, spv::OpShiftRightLogical, TypeU64(state), guest,
-		                 ConstantDeviceAddress(state, 32))),
-		    value, mask};
+		auto high = Unary(state, spv::OpUConvert, TypeU32(state),
+		                  Binary(state, spv::OpShiftRightLogical, TypeU64(state), guest,
+		                         ConstantDeviceAddress(state, 32)));
+		if (op != BufferCache::BdaLogOp::Store) {
+			high = Binary(state, spv::OpBitwiseOr, TypeU32(state), high,
+			              ConstantU32(state, static_cast<uint32_t>(op)
+			                                     << BufferCache::BDA_STORE_LOG_OP_SHIFT));
+		}
+		const std::array<uint32_t, 4> words {Unary(state, spv::OpUConvert, TypeU32(state), guest),
+		                                     high, value, mask};
 		for (uint32_t i = 0; i < words.size(); i++) {
 			const auto index = i == 0 ? first
 			                          : Binary(state, spv::OpIAdd, TypeU32(state), first,
@@ -1302,8 +1309,9 @@ void LogBdaStore(EmitterState& state, uint32_t guest, uint32_t value, uint32_t m
 
 // The value and mask a store to a page without a cache buffer logs (KYTY_BDA_STORE_LOG), or none.
 struct BdaStoreLogValue {
-	uint32_t value = 0;
-	uint32_t mask  = 0;
+	uint32_t              value = 0;
+	uint32_t              mask  = 0;
+	BufferCache::BdaLogOp op    = BufferCache::BdaLogOp::Store;
 };
 
 // KYTY_BDA_WRITES: `write(host_address)` once `guest` (in range) is mapped to a cache buffer, after
@@ -1321,7 +1329,7 @@ uint32_t WriteBdaIfMapped(ValueEmitContext& ctx, uint32_t guest, uint32_t in_bou
 		    Binary(state, spv::OpINotEqual, TypeBool(state), host, ConstantDeviceAddress(state, 0));
 		EmitIfCondition(state, Unary(state, spv::OpLogicalNot, TypeBool(state), present), [&]() {
 			if (log != nullptr) {
-				LogBdaStore(state, guest, log->value, log->mask);
+				LogBdaStore(state, guest, log->value, log->mask, log->op);
 			} else {
 				RecordBdaDroppedWrite(state);
 			}
@@ -1402,6 +1410,28 @@ void StoreIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t c
 // the bound-buffer atomics index DWORDs (or DWORD pairs). `operation(pointer)` gets a
 // PhysicalStorageBuffer pointer to a u32 (or u64 when `wide`) and returns the pre-op value in the
 // IR's representation (U32, or U64 as a u32 pair).
+// KYTY_BDA_STORE_LOG: the log operation of a 32-bit BUFFER_ATOMIC_* whose old value the shader does
+// not read, so that it can be logged on a page without a cache buffer; Store when it cannot be.
+BufferCache::BdaLogOp BdaLogAtomicOp(const IR::Inst& inst) {
+	using Op = BufferCache::BdaLogOp;
+	if (inst.HasUses() || !GetCodegenOptions().bda_store_log) {
+		return Op::Store;
+	}
+	switch (inst.GetOpcode()) {
+		case IR::ValueOpcode::BufferAtomicIAdd32: return Op::Add;
+		case IR::ValueOpcode::BufferAtomicISub32: return Op::Sub;
+		case IR::ValueOpcode::BufferAtomicAnd32: return Op::And;
+		case IR::ValueOpcode::BufferAtomicOr32: return Op::Or;
+		case IR::ValueOpcode::BufferAtomicXor32: return Op::Xor;
+		case IR::ValueOpcode::BufferAtomicUMin32: return Op::UMin;
+		case IR::ValueOpcode::BufferAtomicUMax32: return Op::UMax;
+		case IR::ValueOpcode::BufferAtomicSMin32: return Op::SMin;
+		case IR::ValueOpcode::BufferAtomicSMax32: return Op::SMax;
+		case IR::ValueOpcode::BufferAtomicSwap32: return Op::Swap;
+		default: return Op::Store;
+	}
+}
+
 template <typename Fn>
 uint32_t EmitIndirectAtomic(ValueEmitContext& ctx, const IR::Inst& inst, bool wide,
                             Fn&& operation) {
@@ -1412,13 +1442,20 @@ uint32_t EmitIndirectAtomic(ValueEmitContext& ctx, const IR::Inst& inst, bool wi
 		const auto access  = IndirectBufferElementAccess(ctx, inst, 0u, wide ? 8u : 4u);
 		const auto aligned = Binary(state, spv::OpBitwiseAnd, TypeU64(state), access.guest,
 		                            ConstantDeviceAddress(state, wide ? ~uint64_t {7} : ~uint64_t {3}));
+		// Parent links and counters set with GLC=0 atomics on pages without a cache buffer (Saros's
+		// BVH builder 0x26ea14a341c67c0f) are logged like stores instead of dropped.
+		const auto       log_op = wide ? BufferCache::BdaLogOp::Store : BdaLogAtomicOp(inst);
+		BdaStoreLogValue log {};
+		if (log_op != BufferCache::BdaLogOp::Store) {
+			log = {ctx.Arg(inst, inst.NumArgs() - 2), ConstantU32(state, ~0u), log_op};
+		}
 		return WriteBdaIfMapped(ctx, aligned, access.in_bounds, type, zero, [&](uint32_t host) {
 			const auto pointer = state.builder.AllocateId();
 			state.builder.AddFunction(
 			    spv::OpConvertUToPtr,
 			    wide ? TypePhysicalU64Pointer(state) : TypePhysicalU32Pointer(state), pointer, host);
 			return operation(pointer);
-		});
+		}, log_op != BufferCache::BdaLogOp::Store ? &log : nullptr);
 	});
 }
 

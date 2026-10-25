@@ -5855,6 +5855,30 @@ void BufferCache::SettleBdaWrittenRange(uint64_t vaddr, uint64_t size, uint64_t 
 	}
 }
 
+// KYTY_BDA_STORE_LOG: the dword after one log entry: a masked store, or a logged atomic (BdaLogOp).
+static uint32_t ApplyBdaLogEntry(uint32_t word, const FaultManager::BdaStore& store) {
+	using Op = BufferCache::BdaLogOp;
+	const auto value = store.value;
+	switch (static_cast<Op>(store.Op())) {
+		case Op::Add: return word + value;
+		case Op::Sub: return word - value;
+		case Op::And: return word & value;
+		case Op::Or: return word | value;
+		case Op::Xor: return word ^ value;
+		case Op::UMin: return std::min(word, value);
+		case Op::UMax: return std::max(word, value);
+		case Op::SMin:
+			return static_cast<uint32_t>(
+			    std::min(static_cast<int32_t>(word), static_cast<int32_t>(value)));
+		case Op::SMax:
+			return static_cast<uint32_t>(
+			    std::max(static_cast<int32_t>(word), static_cast<int32_t>(value)));
+		case Op::Swap: return value;
+		case Op::Store:
+		default: return (word & ~store.mask) | (value & store.mask);
+	}
+}
+
 uint32_t BufferCache::ApplyBdaStoreLog(std::span<const FaultManager::BdaStore> stores,
                                        uint64_t shader_hash) {
 	// The guest-write transition once per dword run, before any byte lands.
@@ -5882,7 +5906,7 @@ uint32_t BufferCache::ApplyBdaStoreLog(std::span<const FaultManager::BdaStore> s
 			dropped++;
 			continue;
 		}
-		word = (word & ~store.mask) | (store.value & store.mask);
+		word = ApplyBdaLogEntry(word, store);
 		if (!Libs::LibKernel::Memory::TryWriteBacking(address, &word, sizeof(word))) {
 			dropped++;
 			continue;

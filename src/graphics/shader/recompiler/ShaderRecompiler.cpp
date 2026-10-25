@@ -181,6 +181,7 @@ bool TryDecodedOperandConstant(const std::array<EmbeddedFetchSgprInfo, 108>& sgp
 		case Decoder::OperandKind::IntegerInlineConstant:
 		case Decoder::OperandKind::FloatInlineConstant: value = op.value; return true;
 		case Decoder::OperandKind::Null: value = 0; return true;
+		case Decoder::OperandKind::Aperture: value = op.value; return true;
 		default: break;
 	}
 	if (IsDecodedSgpr(op) && DecodedSgprReg(op) < sgprs.size() &&
