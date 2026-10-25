@@ -1965,6 +1965,13 @@ bool GuestGpu::ProcessSequenced(Submission& submission) {
 	return complete;
 }
 
+namespace {
+// KYTY_CP_STREAM_DIAG (defined below ProcessIndirectBuffer).
+bool CpStreamDiag();
+void CpStreamDiagCopy(const void* execution, std::span<const uint32_t> commands);
+void CpStreamDiagVerify(const void* execution);
+} // namespace
+
 Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
                                            std::span<const uint32_t> commands) {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Process");
