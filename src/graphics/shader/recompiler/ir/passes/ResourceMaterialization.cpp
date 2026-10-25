@@ -911,6 +911,23 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			return dimension == Decoder::ImageDimension::Dim2D ||
 			       dimension == Decoder::ImageDimension::Dim2DArray;
 		};
+		// KYTY_TABLE_MIXED_CLASSES (default on; =0 off): an image only IMAGE_LOADed (never sampled,
+		// written or compared) reads raw texels, so its candidates may differ in numeric class: each
+		// is fetched from a binding of its own class and the texel bitcast to the root's (the
+		// emitter's indirect ImageRead). Saros' GI kernels (CS 0x9fba2edffc549531, ...) read float
+		// probe volumes and a uint occupancy volume through one bindless table; keeping only the
+		// float majority nulled the occupancy volume, whose zero skips the indirect light.
+		static const bool mixed_classes_enabled = [] {
+			const char* value = std::getenv("KYTY_TABLE_MIXED_CLASSES");
+			return value == nullptr || std::strcmp(value, "0") != 0;
+		}();
+		const auto& root_base     = program.info.images[root_index];
+		const bool  mixed_classes = mixed_classes_enabled &&
+		                           root_base.resource_class == ImageResourceClass::Sampled &&
+		                           !root_base.written && !root_base.atomic && !root_base.depth_compare &&
+		                           std::ranges::none_of(program.info.sampled_pairs, [&](const auto& pair) {
+			                           return pair.image == root_index;
+		                           });
 		// KYTY_INDIRECT_TABLE_IMAGES: a bindless table holds descriptors of every kind, and the
 		// shader can only use those its instruction can read. The exemplar is the most common
 		// class among the non-null candidates of the instruction's dimension; the other
@@ -927,7 +944,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 					       (is_2d(image.dimension) && is_2d(wanted));
 				};
 				const auto same_class = [&](const auto& a, const auto& b) {
-					return a.numeric_class == b.numeric_class &&
+					return (mixed_classes || a.numeric_class == b.numeric_class) &&
 					       (a.dimension == b.dimension || (is_2d(a.dimension) && is_2d(b.dimension))) &&
 					       a.cube == b.cube && a.mip_count == b.mip_count &&
 					       a.conversion_format == b.conversion_format &&
@@ -1017,7 +1034,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			}
 			const bool same_coordinates = image.dimension == image_class.dimension &&
 			                              image.cube == image_class.cube;
-			if (image.numeric_class != image_class.numeric_class ||
+			if ((!mixed_classes && image.numeric_class != image_class.numeric_class) ||
 			    (!same_coordinates && !(is_2d(image.dimension) && is_2d(image_class.dimension))) ||
 			    image.mip_count != image_class.mip_count ||
 			    image.conversion_format != image_class.conversion_format ||

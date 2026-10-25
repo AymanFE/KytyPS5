@@ -1052,19 +1052,26 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		        state, condition, TypeU32Vector(state, 4), ConstantU32CompositeZero(state, 4),
 		        [&]() {
 			        const auto Fetch = [&](uint32_t resource) {
-				        const auto descriptor = LoadImageDescriptor(state, resource);
-				        const auto color      = state.builder.AllocateId();
-				        const auto coord      = CoordU32(ctx, mem, *address, dimension);
+				        // A table candidate may be of another numeric class than its root
+				        // (KYTY_TABLE_MIXED_CLASSES): fetch in its own, bitcast the texel to the root's.
+				        const auto fetch_class = state.program.info.images[resource].numeric_class;
+				        const auto descriptor  = LoadImageDescriptor(state, resource);
+				        const auto color       = state.builder.AllocateId();
+				        const auto coord       = CoordU32(ctx, mem, *address, dimension);
 				        if (dimension_info.multisampled != 0u) {
 					        state.builder.AddFunction(
-					            spv::OpImageFetch, ImageVectorType(state, numeric_class, 4), color,
+					            spv::OpImageFetch, ImageVectorType(state, fetch_class, 4), color,
 					            descriptor, coord, spv::ImageOperandsSampleMask,
 					            AddressU32(ctx, mem, *address, dimension_info.coordinate_components));
 				        } else {
 					        state.builder.AddFunction(spv::OpImageFetch,
-					                                  ImageVectorType(state, numeric_class, 4), color,
+					                                  ImageVectorType(state, fetch_class, 4), color,
 					                                  descriptor, coord, spv::ImageOperandsLodMask,
 					                                  LodU32(ctx, mem, *address, dimension));
+				        }
+				        if (fetch_class != numeric_class) {
+					        return Unary(state, spv::OpBitcast, ImageVectorType(state, numeric_class, 4),
+					                     color);
 				        }
 				        return color;
 			        };
