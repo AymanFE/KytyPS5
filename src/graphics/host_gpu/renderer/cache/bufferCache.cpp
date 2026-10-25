@@ -4816,11 +4816,14 @@ std::optional<BufferContentRevision> BufferCache::GetContentRevision(uint64_t va
 	return BufferContentRevision {*owner, buffer.ContentRevision(), m_content_revision_epoch};
 }
 
-// KYTY_BDA_HOT_SETTLE_WRITTEN (default 1; =0 settles every hot page before each unbounded writer).
+// KYTY_BDA_HOT_SETTLE_WRITTEN (default 0: every hot page is settled before each unbounded writer;
+// =1 settles only the hot pages a KYTY_BDA_WRITES dispatch wrote). With =1 Saros keeps a hot set it
+// compares about 2.4 million times a second, which costs more than the write faults it saves: its
+// slow scenes ran at 1.6-7 fps against 7-16 fps with =0 (same build, same scene).
 static bool BdaHotSettleWritten() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_BDA_HOT_SETTLE_WRITTEN");
-		return value == nullptr || std::strcmp(value, "0") != 0;
+		return value != nullptr && std::strcmp(value, "1") == 0;
 	}();
 	return enabled;
 }
